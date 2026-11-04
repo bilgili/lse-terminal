@@ -179,6 +179,18 @@ def test_broker_capabilities():
     assert b.capabilities() == {"candles", "prices", "quote", "search"}
 
 
+def test_broker_candles_bounds_are_half_open_and_accept_iso():
+    from unittest.mock import MagicMock
+
+    from lse_terminal.engine.broker_hub import BrokerProvider
+    b = BrokerProvider.__new__(BrokerProvider)
+    b.hub, b.broker = MagicMock(), "x"
+    rows = [[t * 1000, 1, 2, 0.5, 1, 10] for t in (100, 200, 300, 400)]
+    b.hub.connector.return_value.request.return_value = {"bars": rows}
+    got = list(b.candles("S", "1m", start=100, end="1970-01-01T00:05:00Z")["ts"])
+    assert got == [100, 200]  # 300 == end is excluded
+
+
 from lse_terminal.testing import check_provider
 
 

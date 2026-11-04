@@ -422,3 +422,23 @@ def test_prices_on_a_source_without_a_board_is_404(client):
 def test_screener_on_a_source_without_one_is_404(client):
     r = client.get("/api/screener", params={"provider": "demo"})
     assert r.status_code == 404
+    assert r.json()["detail"] == "demo has no screener feed"
+
+
+def test_prices_on_a_source_without_a_board_is_404_even_for_empty_symbols(client):
+    r = client.get("/api/prices", params={"provider": "demo", "symbols": ","})
+    assert r.status_code == 404
+    assert r.json()["detail"] == "demo has no price board"
+
+
+def test_providers_listing_pins_capabilities(client):
+    provs = {p["name"]: p for p in client.get("/api/providers").json()}
+    assert {"prices", "screener", "logos", "options", "flow", "calendar",
+            "macro"} <= set(provs["lse"]["capabilities"])
+    assert set(provs["demo"]["capabilities"]) == {"candles", "quote", "search", "stream"}
+
+
+def test_logos_on_a_source_without_them_is_empty(client):
+    r = client.get("/api/logos", params={"provider": "demo"})
+    assert r.status_code == 200
+    assert r.json() == {}

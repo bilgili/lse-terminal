@@ -709,6 +709,8 @@ def create_app() -> FastAPI:
             p = reg.get(provider)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        if "prices" not in p.capabilities():
+            raise HTTPException(404, f"{provider} has no price board")
         syms = [s for s in symbols.split(",") if s.strip()][:50]
         if not syms:
             return []

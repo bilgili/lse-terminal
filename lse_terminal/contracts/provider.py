@@ -103,7 +103,7 @@ class Provider(ABC):
 
     def screener(self) -> dict:
         """Cross-sectional snapshot ``{"columns": [...], "data": [...]}`` (plus ``as_of``, ``count``)."""
-        raise NotSupported(f"{self.name} has no screener")
+        raise NotSupported(f"{self.name} has no screener feed")
 
     def logos(self) -> dict:
         """Symbol -> ``{"light": url, "dark": url}``."""

@@ -27,7 +27,7 @@ from pathlib import Path
 # The data-provider contract, for offering a connected broker as a source the
 # markets page can read (BrokerProvider, at the foot of this file).
 from lse_terminal.contracts import (CANDLE_COLUMNS, Instrument, NotSupported,
-                                    Provider, Quote)
+                                    Provider, Quote, to_epoch)
 
 # The dynamic connection directory: which brokers and LSE-shipped data
 # sources exist is decided by OUR API at runtime, not baked into the
@@ -1270,10 +1270,13 @@ class BrokerProvider(Provider):
         for col in ("open", "high", "low", "close", "volume"):
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.dropna(subset=["ts", "open", "high", "low", "close"])
-        if start is not None:
-            df = df[df["ts"] >= int(start)]
-        if end is not None:
-            df = df[df["ts"] <= int(end)]
+        # ponytail: bars.history takes a count, so a start-anchored call gets the
+        # newest N bars, not the oldest N from start. Needs an adapter-side anchor.
+        s, e = to_epoch(start), to_epoch(end)
+        if s is not None:
+            df = df[df["ts"] >= s]
+        if e is not None:
+            df = df[df["ts"] < e]
         return df[CANDLE_COLUMNS].sort_values("ts").reset_index(drop=True)
 
     def _board(self, symbols: list) -> dict:
