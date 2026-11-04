@@ -149,7 +149,7 @@ In `lse_terminal/contracts/__init__.py`, add `TIMEFRAME_SECONDS` and `to_epoch` 
 - [ ] **Step 4: Run to verify pass**
 
 Run: `.venv/bin/python -m pytest tests/test_contract.py -v`
-Expected: PASS, 11 tests.
+Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -600,7 +600,7 @@ Add after `stream`, each with its docstring naming the row type:
         raise NotSupported(f"{self.name} has no price board")
 
     def screener(self) -> dict:
-        """Cross-sectional snapshot ``{"columns": [...], "rows": [...]}``."""
+        """Cross-sectional snapshot ``{"columns": [...], "data": [...]}`` (plus ``as_of``, ``count``)."""
         raise NotSupported(f"{self.name} has no screener")
 
     def logos(self) -> dict:
@@ -918,8 +918,8 @@ def _check_capabilities(provider: Provider, sym: str) -> list[str]:
                 out.append(f"{m}: raised {type(ex).__name__}: {ex}")
                 continue
             if m == "screener":
-                if not isinstance(res, dict) or not {"columns", "rows"} <= set(res):
-                    out.append("screener: must return {columns, rows}")
+                if not isinstance(res, dict) or not {"columns", "data"} <= set(res):
+                    out.append("screener: must return {columns, data}")
                 continue
             if m == "logos":
                 if not isinstance(res, dict):
@@ -945,7 +945,6 @@ def _check_capabilities(provider: Provider, sym: str) -> list[str]:
 Run: `.venv/bin/python -m pytest tests/ -q`
 Expected: all PASS, including `test_demo_passes_compliance_harness` in `test_demo_provider.py`.
 
-If `test_fixture_rows_pass_the_harness` fails on `screener` because the fixture's screener keys differ from `{columns, rows}`, read the fixture, set the check to the fixture's two top-level keys, and update the `screener` docstring in `provider.py` to match.
 
 - [ ] **Step 5: Commit**
 

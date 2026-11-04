@@ -73,7 +73,7 @@ A `candles` answer with fewer than `limit` rows SHALL contain every bar the sour
 - **THEN** it contains `tick`
 
 ### Requirement: Required row keys per surface
-`lse_terminal.contracts.types` SHALL define one `TypedDict` per surface row: `PriceRow`, `ChainRow`, `FlowRow`, `CalendarRow`, `MacroCatalogRow`, `MacroSeriesRow`, `UnderlyingRow`, and the shapes of `logos` (symbol to `{light, dark}`) and `screener` (`{columns, rows}`). Required keys SHALL be the keys present in the recorded LSE fixture `tests/fixtures/lse_rows.json` that `app.js` or the engine reads. Each lifted method's docstring SHALL name its row type.
+`lse_terminal.contracts.types` SHALL define one `TypedDict` per surface row: `PriceRow`, `ChainRow`, `FlowRow`, `CalendarRow`, `MacroCatalogRow`, `MacroSeriesRow`, `UnderlyingRow`, and the shapes of `logos` (symbol to `{light, dark}`) and `screener` (`{columns, data}`, as recorded in the fixture). Required keys SHALL be the keys present in the recorded LSE fixture `tests/fixtures/lse_rows.json` that `app.js` or the engine reads. Each lifted method's docstring SHALL name its row type.
 
 #### Scenario: LSE fixture passes
 - **WHEN** `check_provider` runs against a provider that returns the fixture rows
