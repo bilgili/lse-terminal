@@ -21,23 +21,34 @@ TIMEFRAME_SECONDS: dict[str, int] = {
 }
 
 
-def to_epoch(bound) -> int | None:
+def to_epoch(bound: int | float | str | None) -> int | None:
     """A start/end bound as integer epoch seconds UTC.
 
-    Accepts an int/float, a digit string, a date-only string, or an ISO
-    string with or without an offset ("Z" included). A naive value is UTC.
+    Accepts an int/float, None, or a string. A string is an ASCII digit
+    string (optional leading "-"), a date-only string, or what
+    datetime.isoformat() emits, plus a "Z" suffix. Float strings are not
+    accepted. A naive value is UTC. Empty or whitespace-only is None.
     """
-    if bound is None or bound == "":
+    if isinstance(bound, bool):
+        raise TypeError("bound must not be bool")
+    if bound is None:
         return None
     if isinstance(bound, (int, float)):
         return int(bound)
     s = str(bound).strip()
-    if s.lstrip("-").isdigit():
+    if not s:
+        return None
+    d = s.lstrip("-")
+    if d.isascii() and d.isdigit():
         return int(s)
-    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise ValueError(f"unparseable bound: {bound!r}") from e
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp())
+
 
 
 @dataclass
