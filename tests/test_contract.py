@@ -167,3 +167,61 @@ def test_broker_capabilities():
     from lse_terminal.engine.broker_hub import BrokerProvider
     b = BrokerProvider.__new__(BrokerProvider)  # skip the hub
     assert b.capabilities() == {"candles", "prices", "quote", "search"}
+
+
+from lse_terminal.testing import check_provider  # noqa: E402
+
+
+def test_demo_passes_full_harness():
+    assert check_provider(DemoProvider()) == []
+
+
+def test_claimed_capability_that_raises_is_a_violation():
+    class Liar(DemoProvider):
+        def screener(self):
+            raise NotSupported("no")
+    problems = check_provider(Liar())
+    assert any("screener" in p for p in problems)
+
+
+def test_missing_row_key_is_a_violation():
+    class BadChain(DemoProvider):
+        def options_underlyings(self):
+            return [{"symbol": "X"}]
+
+        def option_chain(self, underlying, type=None, expiry=None, limit=5000):
+            return [{"contract_type": "call", "expiry": "2030-01-01", "last_price": 1.0}]
+    problems = check_provider(BadChain())
+    assert any("option_chain" in p and "strike" in p for p in problems)
+
+
+def test_inclusive_end_is_a_violation():
+    class Inclusive(DemoProvider):
+        def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+            df = super().candles(symbol, timeframe, limit=limit, start=start)
+            e = to_epoch(end)
+            return df if e is None else df[df["ts"] <= e].reset_index(drop=True)
+    problems = check_provider(Inclusive())
+    assert any("end is exclusive" in p for p in problems)
+
+
+def test_limit_not_respected_on_a_surface_is_a_violation():
+    class Chatty(DemoProvider):
+        def options_flow(self, underlying=None, type=None, min_premium=None, limit=300):
+            row = {"contract_type": "call", "strike": 1.0, "expiry": "2030-01-01", "premium": 1.0}
+            return [row] * (limit + 3)
+    problems = check_provider(Chatty())
+    assert any("options_flow" in p and "limit" in p for p in problems)
+
+
+def test_fixture_rows_pass_the_harness():
+    class Replay(DemoProvider):
+        pass
+    for m in ROW_TYPES:
+        row = FIXTURE[m]
+        if row is not None:
+            setattr(Replay, m, lambda self, *a, _r=row, **k: [_r])
+    for m in ("screener", "logos"):
+        if FIXTURE[m] is not None:
+            setattr(Replay, m, lambda self, *a, _r=FIXTURE[m], **k: _r)
+    assert check_provider(Replay()) == []
