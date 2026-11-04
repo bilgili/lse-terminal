@@ -1,0 +1,145 @@
+{
+  "prices": {
+    "symbol": "AAPL",
+    "price": 334.61,
+    "bid": 334.61,
+    "ask": 334.7,
+    "ts": "2026-11-04T12:33:50.714373+01:00"
+  },
+  "screener": {
+    "as_of": "2026-11-04T11:33:57.196833+00:00",
+    "count": 15041,
+    "columns": [
+      {
+        "col": "symbol",
+        "label": "Symbol",
+        "group": "identity",
+        "fmt": "text"
+      }
+    ],
+    "data": [
+      {
+        "symbol": "3DES.UK",
+        "asset_class": "etf",
+        "name": "WisdomTree DAX 3x Daily Short",
+        "market_open": false,
+        "price": 15.65,
+        "bid": 15.65,
+        "ask": 15.71,
+        "change_1h_pct": -0.06385696040868455,
+        "change_24h_pct": -0.8238,
+        "change_1w_pct": -1.8809,
+        "change_1m_pct": -7.832744405182567,
+        "gap_pct": 1.6476552598225602,
+        "day_open": 16.04,
+        "day_high": 16.04,
+        "day_low": 15.65,
+        "prev_close": 15.78,
+        "week52_high": 17.92,
+        "week52_low": 15.39,
+        "week52_high_dist_pct": -12.667410714285714,
+        "week52_low_dist_pct": 1.6894087069525665,
+        "volume_today": 2012.0,
+        "avg_volume_20d": 2408.65,
+        "rel_volume": 0.8353226911340378,
+        "dollar_volume": 31487.8,
+        "rsi_14": 39.57968476357268,
+        "atr_14": 0.5595764285714285,
+        "atr_pct": 3.5755682336832497,
+        "realized_vol_20d": 46.1180599784219,
+        "sma20_dist_pct": -5.721735805616653,
+        "sma50_dist_pct": -6.1553519195540485,
+        "sma200_dist_pct": -6.1553519195540485,
+        "bb_pctb": 0.12555951694997874,
+        "move_percentile": 13.9,
+        "market_cap": 18437497.0,
+        "has_upcoming_split": false,
+        "next_event_at": "2026-11-04T14:15:00+01:00",
+        "next_event_name": "ADP Employment Change",
+        "next_event_impact": "medium",
+        "event_risk_score": 17.0,
+        "macro_surprise_30d": 0.09,
+        "event_move_avg_pct": 1.106,
+        "event_sensitivity": {
+          "jobs": 1.106
+        }
+      }
+    ]
+  },
+  "logos": {
+    "0001.HK": {
+      "light": "https://api.londonstrategicedge.com/logos/0001.HK.webp",
+      "dark": "https://api.londonstrategicedge.com/logos/0001.HK.webp"
+    }
+  },
+  "options_underlyings": {
+    "symbol": "1ATUS",
+    "name": "1ATUS"
+  },
+  "option_chain": {
+    "contract_type": "call",
+    "delta": 0.9987,
+    "dte": 0,
+    "expiry": "2026-11-04",
+    "gamma": 5.3e-05,
+    "greeks_at": "2026-11-03T20:38:11.246162378Z",
+    "greeks_underlying_price": 754.0,
+    "iv": 2.0236,
+    "last_price": 204.09,
+    "last_trade_at": "2026-11-03T20:38:11.246162378Z",
+    "pair_id": 6067215871,
+    "premium_today": 0.0,
+    "strike": 550.0,
+    "symbol": "SPY   261104C00550000",
+    "theta": -0.2287,
+    "ticker": "SPY261104C00550000",
+    "underlying": "SPY",
+    "vega": 0.0017,
+    "volume_today": 0
+  },
+  "options_flow": {
+    "contract_type": "call",
+    "delta": null,
+    "dte": 0,
+    "expiry": "2026-11-04",
+    "gamma": null,
+    "iv": null,
+    "pair_id": 6008066269,
+    "premium": 440.0,
+    "price": 4.4,
+    "size": 1,
+    "strike": 7725.0,
+    "symbol": "SPXW  261104C07725000",
+    "theta": null,
+    "ticker": "SPXW261104C07725000",
+    "ts": "2026-11-04T11:34:10.531353305Z",
+    "underlying": "SPXW",
+    "underlying_price": null,
+    "vega": null,
+    "venue": "C"
+  },
+  "economic_calendar": {
+    "id": 20734,
+    "date": "2015-01-01",
+    "time": "01:00 AM",
+    "datetime": "2015-01-01T01:00:00Z",
+    "region_code": "KR",
+    "event": "Balance of Trade DEC",
+    "period_hint": "DEC",
+    "actual": "$5.78B",
+    "previous": "$5.51B",
+    "consensus": "$ 4.7B",
+    "forecast": null,
+    "actual_revised": 0,
+    "previous_revised": 1,
+    "consensus_revised": 0,
+    "forecast_revised": 0,
+    "created_at": "2025-12-10T23:27:31Z",
+    "updated_at": "2025-12-10T23:27:31Z"
+  },
+  "macro_catalog": null,
+  "macro_series": null,
+  "_errors": {
+    "macro_catalog": "LSEError: [400] 'economics' is not a market; markets() lists them"
+  }
+}
