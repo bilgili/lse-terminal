@@ -153,7 +153,7 @@ class MacroSeriesRow(TypedDict):
     value: float
 
 
-ROW_TYPES = {
+ROW_TYPES: Mapping[str, type] = MappingProxyType({
     "prices": PriceRow,
     "options_underlyings": UnderlyingRow,
     "option_chain": ChainRow,
@@ -161,4 +161,14 @@ ROW_TYPES = {
     "economic_calendar": CalendarRow,
     "macro_catalog": MacroCatalogRow,
     "macro_series": MacroSeriesRow,
-}
+})
+
+
+# The screener snapshot is a dict with exactly these top-level keys.
+SCREENER_KEYS = frozenset({"columns", "data"})
+
+
+class LogoRow(TypedDict):
+    """One value of logos(): the logo URLs for a symbol."""
+    light: str
+    dark: str

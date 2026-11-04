@@ -17,7 +17,9 @@ import pandas as pd
 from lse_terminal.contracts import (
     CANDLE_COLUMNS,
     ROW_TYPES,
+    SCREENER_KEYS,
     Instrument,
+    LogoRow,
     NotSupported,
     Provider,
 )
@@ -230,12 +232,18 @@ def _check_capabilities(provider: Provider, sym: str) -> list[str]:
                 first_symbol[m] = None
                 continue
             if m == "screener":
-                if not isinstance(res, dict) or not {"columns", "data"} <= set(res):
-                    out.append("screener: must return a dict with 'columns' and 'data'")
+                if not isinstance(res, dict) or not SCREENER_KEYS <= set(res):
+                    out.append(f"screener: must return a dict with {sorted(SCREENER_KEYS)}")
                 continue
             if m == "logos":
                 if not isinstance(res, dict):
                     out.append("logos: must return a dict")
+                else:
+                    for v in list(res.values())[:PROBE_LIMIT]:
+                        if not isinstance(v, dict) or not LogoRow.__required_keys__ <= set(v):
+                            out.append("logos: each value must be a dict with "
+                                       f"{sorted(LogoRow.__required_keys__)}")
+                            break
                 continue
             if not isinstance(res, list):
                 out.append(f"{m}: must return a list of rows")

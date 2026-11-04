@@ -334,6 +334,27 @@ def test_empty_listing_skips_the_dependent_probe():
     assert check_provider(NoContracts()) == []
 
 
+# ---- contract ownership -------------------------------------------------------
+
+def test_logo_values_must_be_light_dark_dicts():
+    class BadLogos(DemoProvider):
+        def logos(self):
+            return {"X": "url"}
+    problems = check_provider(BadLogos())
+    assert any(p.startswith("logos:") for p in problems)
+
+
+def test_screener_and_logo_shapes_live_in_the_contract():
+    from lse_terminal.contracts import SCREENER_KEYS, LogoRow
+    assert SCREENER_KEYS == {"columns", "data"}
+    assert LogoRow.__required_keys__ == {"light", "dark"}
+
+
+def test_row_types_is_frozen():
+    with pytest.raises(TypeError):
+        ROW_TYPES["x"] = dict
+
+
 # ---- harness never raises ---------------------------------------------------
 
 def test_candles_returning_non_frame_is_reported_not_raised():
