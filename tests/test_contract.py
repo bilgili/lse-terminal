@@ -287,3 +287,43 @@ def test_nondeterministic_provider_claiming_determinism_is_a_violation():
             return df
     problems = check_provider(Drift())
     assert "deterministic=True but two identical calls differ" in problems
+
+
+# ---- harness never raises ---------------------------------------------------
+
+def test_candles_returning_non_frame_is_reported_not_raised():
+    class Records(DemoProvider):
+        def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+            return super().candles(symbol, timeframe, limit=limit,
+                                   start=start, end=end).to_dict("records")
+    problems = check_provider(Records())
+    assert any("DataFrame" in p for p in problems)
+
+
+def test_search_returning_non_instrument_is_reported_not_raised():
+    class Dicts(DemoProvider):
+        def search(self, query="", limit=50):
+            return [{"symbol": "X"}]
+    assert any("non-Instrument" in p for p in check_provider(Dicts()))
+
+
+def test_bad_timeframes_is_reported_not_raised():
+    class NoTf(DemoProvider):
+        timeframes = None
+    assert any("timeframes" in p for p in check_provider(NoTf()))
+
+
+def test_capabilities_raising_is_reported_not_raised():
+    class Boom(DemoProvider):
+        def capabilities(self):
+            raise RuntimeError("x")
+    assert any("capabilities() raised" in p for p in check_provider(Boom()))
+
+
+def test_unexpected_harness_error_is_reported_not_raised(monkeypatch):
+    import lse_terminal.testing as t
+
+    def boom(*a, **k):
+        raise KeyError("oops")
+    monkeypatch.setattr(t, "_check_capabilities", boom)
+    assert any("harness error" in p for p in check_provider(DemoProvider()))

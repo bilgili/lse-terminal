@@ -12,6 +12,8 @@ contract can't drift from what the harness enforces.
 
 from __future__ import annotations
 
+import pandas as pd
+
 from lse_terminal.contracts import (
     CANDLE_COLUMNS,
     ROW_TYPES,
@@ -27,26 +29,44 @@ def check_provider(provider: Provider, symbol: str | None = None,
                    timeframe: str | None = None) -> list[str]:
     """Returns a list of human-readable contract violations (empty = compliant)."""
     problems: list[str] = []
+    try:
+        _run(provider, symbol, timeframe, problems)
+    except Exception as ex:  # noqa: BLE001 - last guard: the harness never raises
+        problems.append(f"harness error (please report): {ex!r}")
+    return problems
 
+
+def _run(provider: Provider, symbol: str | None, timeframe: str | None,
+         problems: list[str]) -> None:
     if not provider.name:
         problems.append("provider.name is empty")
-    if not provider.timeframes:
-        problems.append("provider.timeframes is empty")
+    try:
+        tfs_all = provider.timeframes
+        if (not isinstance(tfs_all, (list, tuple)) or not tfs_all
+                or not all(isinstance(t, str) for t in tfs_all)):
+            raise TypeError(f"{tfs_all!r}")
+    except Exception as ex:  # noqa: BLE001 - harness reports, never crashes
+        problems.append(f"provider.timeframes must be a non-empty list or tuple "
+                        f"of strings: {ex}")
+        return
 
     try:
         results = provider.search("", limit=5)
-    except Exception as e:
-        return problems + [f"search() raised: {e}"]
+    except Exception as e:  # noqa: BLE001
+        problems.append(f"search() raised: {e}")
+        return
     if not results:
-        return problems + ["search('') returned nothing; a default list is required"]
-    for ins in results:
-        if not isinstance(ins, Instrument):
-            problems.append(f"search() returned non-Instrument: {ins!r}")
+        problems.append("search('') returned nothing; a default list is required")
+        return
+    bad = [r for r in results if not isinstance(r, Instrument)]
+    if bad:
+        problems.extend(f"search() returned non-Instrument: {r!r}" for r in bad)
+        return
 
     sym = symbol or results[0].symbol
     # Without an explicit timeframe, take the first that serves rows: some sources
     # only serve each symbol's native timeframe.
-    tfs = [timeframe] if timeframe else list(provider.timeframes) or [""]
+    tfs = [timeframe] if timeframe else list(tfs_all)
     first_err = None
     for tf in tfs:
         try:
@@ -54,18 +74,22 @@ def check_provider(provider: Provider, symbol: str | None = None,
         except Exception as e:  # noqa: BLE001 - harness reports, never crashes
             first_err = first_err or f"candles({sym!r}, {tf!r}) raised: {e}"
             continue
+        if not isinstance(df, pd.DataFrame):
+            problems.append(_not_frame(sym, tf, df))
+            return
         if len(df) >= 1 or tf == tfs[-1] or timeframe:
             first_err = None
             break
     if first_err:
-        return problems + [first_err]
+        problems.append(first_err)
+        return
 
     if list(df.columns) != CANDLE_COLUMNS:
         problems.append(f"candles columns {list(df.columns)} != {CANDLE_COLUMNS}")
-        return problems
+        return
     if len(df) == 0:
         problems.append(f"candles({sym!r}, {tf!r}) returned zero rows")
-        return problems
+        return
     if len(df) > 50:
         problems.append(f"limit=50 not respected: got {len(df)} rows")
     ts = df["ts"]
@@ -88,12 +112,18 @@ def check_provider(provider: Provider, symbol: str | None = None,
             problems.append(f"candles({sym!r}, {tf!r}, limit=50) raised on the "
                             f"determinism re-call: {ex!r}")
         else:
-            if not df.equals(df2):
+            if not isinstance(df2, pd.DataFrame):
+                problems.append(_not_frame(sym, tf, df2))
+            elif not df.equals(df2):
                 problems.append("deterministic=True but two identical calls differ")
 
     problems += _check_candle_clauses(provider, sym, tf, df)
     problems += _check_capabilities(provider, sym)
-    return problems
+
+
+def _not_frame(sym: str, tf: str, got) -> str:
+    return (f"candles({sym!r}, {tf!r}, ...) must return a pandas DataFrame, "
+            f"got {type(got).__name__}")
 
 
 def _check_candle_clauses(provider: Provider, sym: str, tf: str, df) -> list[str]:
@@ -107,8 +137,10 @@ def _check_candle_clauses(provider: Provider, sym: str, tf: str, df) -> list[str
     s, e = ts[0], ts[2]
     call = f"candles({sym!r}, {tf!r}, limit=50, start={s}, end={e})"
     try:
-        got = {int(t) for t in provider.candles(
-            sym, tf, limit=50, start=str(s), end=str(e))["ts"]}
+        fr = provider.candles(sym, tf, limit=50, start=str(s), end=str(e))
+        if not isinstance(fr, pd.DataFrame):
+            return [_not_frame(sym, tf, fr)]
+        got = {int(t) for t in fr["ts"]}
     except Exception as ex:  # noqa: BLE001 - harness reports, never crashes
         return [f"{call} raised: {ex!r}"]
     if e in got:
@@ -117,8 +149,12 @@ def _check_candle_clauses(provider: Provider, sym: str, tf: str, df) -> list[str
         out.append("start is inclusive: the bar at ts == start is missing")
     call = f"candles({sym!r}, {tf!r}, limit=2 and limit=10, start={s})"
     try:
-        small = list(provider.candles(sym, tf, limit=2, start=str(s))["ts"])
-        big = list(provider.candles(sym, tf, limit=10, start=str(s))["ts"])
+        fs = provider.candles(sym, tf, limit=2, start=str(s))
+        fb = provider.candles(sym, tf, limit=10, start=str(s))
+        for fr in (fs, fb):
+            if not isinstance(fr, pd.DataFrame):
+                return out + [_not_frame(sym, tf, fr)]
+        small, big = list(fs["ts"]), list(fb["ts"])
     except Exception as ex:  # noqa: BLE001
         return out + [f"{call} raised: {ex!r}"]
     if small != big[:len(small)]:
@@ -149,7 +185,10 @@ def _probe(provider: Provider, method: str, sym: str, listed: str | None = None)
 
 def _check_capabilities(provider: Provider, sym: str) -> list[str]:
     out: list[str] = []
-    caps = provider.capabilities()
+    try:
+        caps = provider.capabilities()
+    except Exception as ex:  # noqa: BLE001 - harness reports, never crashes
+        return [f"capabilities() raised: {ex!r}"]
     # listing method -> first symbol; "" when the listing is empty, None when unusable
     first_symbol: dict[str, str | None] = {}
     for cap, methods in Provider._CAPABILITY_METHODS.items():
