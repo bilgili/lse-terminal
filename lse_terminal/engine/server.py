@@ -709,14 +709,15 @@ def create_app() -> FastAPI:
             p = reg.get(provider)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        fn = getattr(p, "prices", None)
-        if fn is None:
+        if "prices" not in p.capabilities():
             raise HTTPException(404, f"{provider} has no price board")
         syms = [s for s in symbols.split(",") if s.strip()][:50]
         if not syms:
             return []
         try:
-            return fn(syms)
+            return p.prices(syms)
+        except NotSupported as e:
+            raise HTTPException(404, str(e))
         except Exception as e:
             raise HTTPException(502, f"prices failed: {e}")
 
@@ -730,11 +731,10 @@ def create_app() -> FastAPI:
             p = reg.get(provider)
         except ValueError as e:
             raise HTTPException(404, str(e))
-        fn = getattr(p, "screener", None)
-        if fn is None:
-            raise HTTPException(404, f"{provider} has no screener feed")
         try:
-            return fn()
+            return p.screener()
+        except NotSupported as e:
+            raise HTTPException(404, str(e))
         except RuntimeError as e:
             # Unconfigured key: same 409 contract as the options routes so
             # the page renders the connect hint instead of an error.

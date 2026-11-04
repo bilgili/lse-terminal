@@ -16,16 +16,14 @@ import zlib
 import numpy as np
 import pandas as pd
 
-from lse_terminal.contracts import CANDLE_COLUMNS, Instrument, NotSupported, Provider, Quote
+from lse_terminal.contracts import (
+    CANDLE_COLUMNS, TIMEFRAME_SECONDS, Instrument, NotSupported, Provider, Quote, to_epoch,
+)
 
-_TF_SECONDS = {
-    # "tick" is a per-second walk here: demo trades print about once a
-    # second, so on synthetic data the tape and 1s bars share a step; the
-    # walks still differ (the seed hashes the timeframe label).
-    "tick": 1, "1s": 1, "30s": 30,
-    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
-    "1h": 3600, "4h": 14400, "1d": 86400, "1w": 604800,
-}
+# Demo serves "tick" as a one-second walk (trades print about once a second
+# here, so the tape and 1s bars share a step; the walks still differ because
+# the seed hashes the timeframe label). The shared table has no tick.
+_TF_SECONDS = {"tick": 1, **TIMEFRAME_SECONDS}
 
 # symbol -> (name, category, base price, per-bar log-return scale)
 _UNIVERSE = {
@@ -58,6 +56,7 @@ class DemoProvider(Provider):
     title = "Demo (synthetic)"
     timeframes = list(_TF_SECONDS)
     deterministic = True
+    cacheable = False
 
     def __init__(self):
         # Walks are anchored at construction time so every candles() call for
@@ -120,10 +119,11 @@ class DemoProvider(Provider):
         if timeframe not in _TF_SECONDS:
             raise ValueError(f"unsupported timeframe: {timeframe}")
         df = self._walk(symbol, timeframe)
-        if start:
-            df = df[df["ts"] >= int(pd.Timestamp(start, tz="UTC").timestamp())]
-        if end:
-            df = df[df["ts"] <= int(pd.Timestamp(end, tz="UTC").timestamp())]
+        s, e = to_epoch(start), to_epoch(end)
+        if s is not None:
+            df = df[df["ts"] >= s]
+        if e is not None:
+            df = df[df["ts"] < e]
         # Same law as the hosted data API: a start-anchored query pages
         # FORWARD (oldest N from start), everything else returns the newest N.
         # The frontend's windowed pagination depends on this distinction.
