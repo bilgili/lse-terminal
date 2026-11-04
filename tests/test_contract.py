@@ -5,7 +5,12 @@ import pandas as pd
 import pytest
 
 from lse_terminal.contracts import (
-    ROW_TYPES, TIMEFRAME_SECONDS, NotSupported, Provider, to_epoch)
+    ROW_TYPES,
+    TIMEFRAME_SECONDS,
+    NotSupported,
+    Provider,
+    to_epoch,
+)
 from lse_terminal.providers import DemoProvider, LseProvider, UserDataProvider
 
 FIXTURE = json.loads(
@@ -73,7 +78,12 @@ def test_required_keys_are_declared(method):
 
 def test_required_sets():
     from lse_terminal.contracts import (
-        CalendarRow, ChainRow, FlowRow, PriceRow, UnderlyingRow)
+        CalendarRow,
+        ChainRow,
+        FlowRow,
+        PriceRow,
+        UnderlyingRow,
+    )
     assert ChainRow.__required_keys__ == {"contract_type", "strike", "expiry", "last_price"}
     assert FlowRow.__required_keys__ == {"contract_type", "strike", "expiry", "premium"}
     assert PriceRow.__required_keys__ == {"symbol", "price"}
@@ -169,7 +179,7 @@ def test_broker_capabilities():
     assert b.capabilities() == {"candles", "prices", "quote", "search"}
 
 
-from lse_terminal.testing import check_provider  # noqa: E402
+from lse_terminal.testing import check_provider
 
 
 def test_claimed_capability_that_raises_is_a_violation():

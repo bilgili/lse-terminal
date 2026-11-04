@@ -1,13 +1,13 @@
 ## 1. Contract, registry, harness (PR 1, no behaviour change)
 
-- [ ] 1.1 Add `TIMEFRAME_SECONDS` and `to_epoch()` to `contracts/types.py`. `userdata.py` imports the table. `demo.py` uses `{**TIMEFRAME_SECONDS, "tick": 1}` and keeps `tick` in its timeframes.
-- [ ] 1.2 Add `is_custom`, `is_broker`, `cacheable`, `settle_seconds`, `snapshot_ttl` attributes to `Provider`. `BrokerProvider` sets `is_broker` through the attribute. `demo`, `userdata`, `BrokerProvider` set `cacheable = False`.
-- [ ] 1.3 Record `tests/fixtures/lse_rows.json`: one row per surface from a real LSE key. Build the `TypedDict` row classes in `contracts/types.py` from the fixture and from the keys `app.js` reads.
-- [ ] 1.4 Add the nine optional methods to `Provider` with `NotSupported` defaults and docstrings that name the row type. Add the candle clauses (half-open, complete, contiguous, raise on failure) to the `candles` docstring.
-- [ ] 1.5 Extend `capabilities()` with `prices`, `screener`, `logos`, `options`, `flow`, `calendar`, `macro`.
-- [ ] 1.6 `load_plugins`: sort entry points by name; default `is_custom = True`.
-- [ ] 1.7 `check_provider`: one block per claimed capability with `__required_keys__`; candle checks for `ts < end`, ascending, and prefix-under-larger-limit; a claimed method that raises `NotSupported` is a violation.
-- [ ] 1.8 Tests: `test_demo_provider.py` still green, including `tick`. New `test_contract.py`: capability detection, harness rejects a claimed-but-raising method, inclusive end is a violation, LSE fixture passes, `TIMEFRAME_SECONDS` has no `tick`, `to_epoch` on the four input shapes.
+- [x] 1.1 Add `TIMEFRAME_SECONDS` and `to_epoch()` to `contracts/types.py`. `userdata.py` imports the table. `demo.py` uses `{**TIMEFRAME_SECONDS, "tick": 1}` and keeps `tick` in its timeframes.
+- [x] 1.2 Add `is_custom`, `is_broker`, `cacheable`, `settle_seconds`, `snapshot_ttl` attributes to `Provider`. `BrokerProvider` sets `is_broker` through the attribute. `demo`, `userdata`, `BrokerProvider` set `cacheable = False`.
+- [x] 1.3 Record `tests/fixtures/lse_rows.json`: one row per surface from a real LSE key. Build the `TypedDict` row classes in `contracts/types.py` from the fixture and from the keys `app.js` reads.
+- [x] 1.4 Add the nine optional methods to `Provider` with `NotSupported` defaults and docstrings that name the row type. Add the candle clauses (half-open, complete, contiguous, raise on failure) to the `candles` docstring.
+- [x] 1.5 Extend `capabilities()` with `prices`, `screener`, `logos`, `options`, `flow`, `calendar`, `macro`.
+- [x] 1.6 `load_plugins`: sort entry points by name; default `is_custom = True`.
+- [x] 1.7 `check_provider`: one block per claimed capability with `__required_keys__`; candle checks for `ts < end`, ascending, and prefix-under-larger-limit; a claimed method that raises `NotSupported` is a violation.
+- [x] 1.8 Tests: `test_demo_provider.py` still green, including `tick`. New `test_contract.py`: capability detection, harness rejects a claimed-but-raising method, inclusive end is a violation, LSE fixture passes, `TIMEFRAME_SECONDS` has no `tick`, `to_epoch` on the four input shapes.
 
 ## 2. Server routes and UI (PR 2, no behaviour change for LSE-only users)
 
