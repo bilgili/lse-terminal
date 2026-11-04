@@ -19,6 +19,12 @@
 - [ ] 2.6 Keep the databank download on `_lse_only()`.
 - [ ] 2.7 `app.js`: add `capParam(cap)` for global routes. Symbol-scoped call sites always send the active source and render 404 as "not supported by this source". Apply at the nine call sites and the two probes.
 - [ ] 2.8 Tests: `FullStubProvider` in `tests/`. One route test per migrated endpoint: explicit provider, global fallback, 400 on a scoped route without provider, 404 on missing capability, 409 on unconfigured, no cross-source call on a scoped 404. `/api/providers` shows the stub as custom with the full capability list. Grep gate for `reg.get("lse")`. Plugin sort order.
+- [ ] 2.9 `LseProvider._gate_ts` calls `to_epoch` and only formats the result. Today it parses bounds with its own rules, so `"20240630"` is a date there and epoch seconds in `to_epoch`.
+- [ ] 2.10 `engine/quant_fit.py` uses `TIMEFRAME_SECONDS` instead of its own timeframe table, which lacks `30s`.
+- [ ] 2.11 `server.py` reads `is_custom`, `is_broker` and `logos` as attributes, not through `getattr(..., default)`. The base class defines all three since PR 1.
+- [ ] 2.12 `Registry.register` records a `plugin_errors` entry when a plugin replaces an existing provider name, so a silent override of `lse` or `userdata` is visible.
+- [ ] 2.13 `BrokerProvider.candles` returns the oldest N bars for a start-anchored call. Today it always asks the adapter for the newest `count` bars.
+- [ ] 2.14 Decide whether `to_epoch` rejects an 8-digit digit string (`"20240630"`), which it reads as epoch seconds in 1970. Record the decision in design D3.
 
 ## 3. Cache (PR 3, behind `LSE_TERMINAL_CACHE`)
 
