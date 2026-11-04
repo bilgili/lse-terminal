@@ -18,8 +18,10 @@ def _prov(n):
     return P
 
 
-def _eps(monkeypatch, *names):
-    eps = [SimpleNamespace(name=n, load=(lambda n=n: _prov(n))) for n in names]
+def _eps(monkeypatch, *pairs):
+    """pairs: (name, loader) tuples, or bare names loading a fresh provider."""
+    eps = [SimpleNamespace(name=p, load=(lambda p=p: _prov(p))) if isinstance(p, str)
+           else SimpleNamespace(name=p[0], load=p[1]) for p in pairs]
     monkeypatch.setattr(regmod, "entry_points",
                         lambda group: eps if group == "lse_terminal.providers" else [])
 
@@ -34,8 +36,11 @@ def test_plugins_load_sorted_and_custom(monkeypatch):
 
 def test_plugin_cannot_opt_out_of_custom(monkeypatch):
     # Entry-point providers are user-installed by definition, so the fleet
-    # directory gate must never hide one.
-    _eps(monkeypatch, "x")
+    # directory gate must never hide one, even if the class opts out.
+    class Opt(_prov("x")):
+        is_custom = False
+
+    _eps(monkeypatch, ("x", lambda: Opt))
     reg = regmod.Registry()
     regmod.load_plugins(reg)
     assert reg.get("x").is_custom is True
@@ -43,9 +48,7 @@ def test_plugin_cannot_opt_out_of_custom(monkeypatch):
 
 def test_plugin_instance_is_marked_custom(monkeypatch):
     inst = _prov("inst")()
-    eps = [SimpleNamespace(name="inst", load=lambda: inst)]
-    monkeypatch.setattr(regmod, "entry_points",
-                        lambda group: eps if group == "lse_terminal.providers" else [])
+    _eps(monkeypatch, ("inst", lambda: inst))
     reg = regmod.Registry()
     regmod.load_plugins(reg)
     assert reg.get("inst").is_custom is True
