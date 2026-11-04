@@ -80,23 +80,25 @@ def load_builtins(reg: Registry) -> None:
 
 
 def load_plugins(reg: Registry) -> None:
-    for ep in entry_points(group="lse_terminal.providers"):
+    for ep in sorted(entry_points(group="lse_terminal.providers"), key=lambda e: e.name):
         try:
             obj = ep.load()
             provider = obj() if inspect.isclass(obj) else obj
+            # Installed by the user, so never hidden by the fleet directory.
+            provider.is_custom = True
             reg.register(provider)
         except Exception as e:
             msg = f"provider plugin {ep.name!r} failed to load: {e}"
             log.warning(msg)
             reg.plugin_errors.append(msg)
-    for ep in entry_points(group="lse_terminal.indicators"):
+    for ep in sorted(entry_points(group="lse_terminal.indicators"), key=lambda e: e.name):
         try:
             ep.load()
         except Exception as e:
             msg = f"indicator plugin {ep.name!r} failed to load: {e}"
             log.warning(msg)
             reg.plugin_errors.append(msg)
-    for ep in entry_points(group="lse_terminal.engines"):
+    for ep in sorted(entry_points(group="lse_terminal.engines"), key=lambda e: e.name):
         try:
             obj = ep.load()
             reg.register_engine(obj() if inspect.isclass(obj) else obj)
