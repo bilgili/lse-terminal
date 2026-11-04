@@ -262,3 +262,18 @@ def test_default_timeframe_falls_through_to_one_that_works():
             return super().candles(symbol, timeframe, limit=limit,
                                    start=start, end=end)
     assert check_provider(OnlyHourly()) == []
+
+
+def test_nondeterministic_provider_claiming_determinism_is_a_violation():
+    class Drift(DemoProvider):
+        deterministic = True
+        calls = 0
+
+        def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+            df = super().candles(symbol, timeframe, limit=limit,
+                                 start=start, end=end).copy()
+            Drift.calls += 1
+            df.loc[df.index[-1], "volume"] += Drift.calls
+            return df
+    problems = check_provider(Drift())
+    assert "deterministic=True but two identical calls differ" in problems

@@ -81,6 +81,16 @@ def check_provider(provider: Provider, symbol: str | None = None,
         problems.append(f"{bad_hi} bars with high < max(open, close)")
     if bad_lo:
         problems.append(f"{bad_lo} bars with low > min(open, close)")
+    if provider.deterministic:
+        try:
+            df2 = provider.candles(sym, tf, limit=50)
+        except Exception as ex:  # noqa: BLE001 - harness reports, never crashes
+            problems.append(f"candles({sym!r}, {tf!r}, limit=50) raised on the "
+                            f"determinism re-call: {ex!r}")
+        else:
+            if not df.equals(df2):
+                problems.append("deterministic=True but two identical calls differ")
+
     problems += _check_candle_clauses(provider, sym, tf, df)
     problems += _check_capabilities(provider, sym)
     return problems
