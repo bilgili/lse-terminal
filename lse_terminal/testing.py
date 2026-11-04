@@ -126,6 +126,14 @@ def _not_frame(sym: str, tf: str, got) -> str:
             f"got {type(got).__name__}")
 
 
+def _raised(call: str, ex: Exception) -> str:
+    msg = f"{call} raised: {ex!r}"
+    if any(w in str(ex).lower() for w in ("year", "parse", "isoformat")):
+        msg += (" (bounds are sent as epoch-second strings; parse them with "
+                "lse_terminal.contracts.to_epoch)")
+    return msg
+
+
 def _check_candle_clauses(provider: Provider, sym: str, tf: str, df) -> list[str]:
     """Half-open bounds and prefix completeness, the clauses the cache needs."""
     if len(df) < 3:
@@ -134,29 +142,36 @@ def _check_candle_clauses(provider: Provider, sym: str, tf: str, df) -> list[str
         return [msg]
     out: list[str] = []
     ts = [int(t) for t in df["ts"]]
-    s, e = ts[0], ts[2]
-    call = f"candles({sym!r}, {tf!r}, limit=50, start={s}, end={e})"
+    ts0, ts1, ts2 = ts[0], ts[1], ts[2]
+    call = f"candles({sym!r}, {tf!r}, limit=50, start={ts0}, end={ts2})"
     try:
-        fr = provider.candles(sym, tf, limit=50, start=str(s), end=str(e))
+        fr = provider.candles(sym, tf, limit=50, start=str(ts0), end=str(ts2))
         if not isinstance(fr, pd.DataFrame):
             return [_not_frame(sym, tf, fr)]
         got = {int(t) for t in fr["ts"]}
     except Exception as ex:  # noqa: BLE001 - harness reports, never crashes
-        return [f"{call} raised: {ex!r}"]
-    if e in got:
-        out.append("end is exclusive: a bar at ts == end was returned")
-    if s not in got:
-        out.append("start is inclusive: the bar at ts == start is missing")
-    call = f"candles({sym!r}, {tf!r}, limit=2 and limit=10, start={s})"
+        return [_raised(call, ex)]
+    # [ts0, ts2) must hold exactly ts0 and ts1.
+    if got != {ts0, ts1}:
+        if ts2 in got:
+            out.append("end is exclusive: a bar at ts == end was returned")
+        if ts0 not in got:
+            out.append("start is inclusive: the bar at ts == start is missing")
+        if any(t < ts0 for t in got):
+            out.append("start is inclusive: bars before start were returned")
+        if ts1 not in got:
+            out.append("bounded answer is not contiguous: "
+                       "a bar inside [start, end) is missing")
+    call = f"candles({sym!r}, {tf!r}, limit=2 and limit=10, start={ts0})"
     try:
-        fs = provider.candles(sym, tf, limit=2, start=str(s))
-        fb = provider.candles(sym, tf, limit=10, start=str(s))
+        fs = provider.candles(sym, tf, limit=2, start=str(ts0))
+        fb = provider.candles(sym, tf, limit=10, start=str(ts0))
         for fr in (fs, fb):
             if not isinstance(fr, pd.DataFrame):
                 return out + [_not_frame(sym, tf, fr)]
         small, big = list(fs["ts"]), list(fb["ts"])
     except Exception as ex:  # noqa: BLE001
-        return out + [f"{call} raised: {ex!r}"]
+        return out + [_raised(call, ex)]
     if small != big[:len(small)]:
         out.append("windowed answer with a smaller limit is not a prefix "
                    "of the same call with a larger limit")
@@ -201,7 +216,9 @@ def _check_capabilities(provider: Provider, sym: str) -> list[str]:
                 if first_symbol.get(dep, None) is None:
                     out.append(f"{m}: not checked: {dep} returned no usable symbol")
                     continue
-                listed = first_symbol[dep] or None
+                if first_symbol[dep] == "":
+                    continue  # empty listing is valid; no symbol to probe with
+                listed = first_symbol[dep]
             try:
                 res = _probe(provider, m, sym, listed)
             except NotSupported:

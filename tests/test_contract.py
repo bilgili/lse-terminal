@@ -289,6 +289,51 @@ def test_nondeterministic_provider_claiming_determinism_is_a_violation():
     assert "deterministic=True but two identical calls differ" in problems
 
 
+# ---- half-open bounds, empty listings ---------------------------------------
+
+def test_start_leak_is_a_violation():
+    class StartLeaky(DemoProvider):
+        def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+            df = super().candles(symbol, timeframe, limit=limit, start=start, end=end)
+            if start is None:
+                return df
+            before = super().candles(symbol, timeframe, limit=limit, end=start).tail(1)
+            return pd.concat([before, df]).reset_index(drop=True)
+    problems = check_provider(StartLeaky())
+    assert any("bars before start were returned" in p for p in problems)
+
+
+def test_dropped_middle_bar_is_a_violation():
+    class DropsMiddle(DemoProvider):
+        def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+            df = super().candles(symbol, timeframe, limit=limit, start=start, end=end)
+            if start is not None and end is not None:
+                df = df.drop(df.index[1]).reset_index(drop=True)
+            return df
+    problems = check_provider(DropsMiddle())
+    assert any("not contiguous" in p for p in problems)
+
+
+def test_bound_parse_failure_points_at_to_epoch():
+    class Parses(DemoProvider):
+        def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+            if start is not None:
+                pd.Timestamp(start, tz="UTC")
+            return super().candles(symbol, timeframe, limit=limit)
+    problems = check_provider(Parses())
+    assert any("to_epoch" in p for p in problems)
+
+
+def test_empty_listing_skips_the_dependent_probe():
+    class NoContracts(DemoProvider):
+        def options_underlyings(self):
+            return []
+
+        def option_chain(self, underlying, type=None, expiry=None, limit=5000):
+            raise ValueError("unknown underlying")
+    assert check_provider(NoContracts()) == []
+
+
 # ---- harness never raises ---------------------------------------------------
 
 def test_candles_returning_non_frame_is_reported_not_raised():
