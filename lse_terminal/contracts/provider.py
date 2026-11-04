@@ -161,7 +161,11 @@ class Provider(ABC):
     })
 
     def capabilities(self) -> set[str]:
-        """Which optional surfaces this provider actually implements."""
+        """Which optional surfaces this provider actually implements.
+
+        A method counts when the provider's class overrides it; attributes set
+        on an instance are ignored.
+        """
         t = type(self)
         caps = {"search", "candles"}
         for cap, methods in self._CAPABILITY_METHODS.items():

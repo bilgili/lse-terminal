@@ -412,3 +412,13 @@ def test_lse_candles_page_past_the_gate_cap(monkeypatch):
     calls.clear()
     df = p.candles("EUR/USD", "1h", limit=5000)
     assert len(df) == 5000 and len(calls) == 1 and list(df["ts"]) == all_ts[-5000:]
+
+
+def test_prices_on_a_source_without_a_board_is_404(client):
+    r = client.get("/api/prices", params={"provider": "demo", "symbols": "DEMO:BTC"})
+    assert r.status_code == 404
+
+
+def test_screener_on_a_source_without_one_is_404(client):
+    r = client.get("/api/screener", params={"provider": "demo"})
+    assert r.status_code == 404

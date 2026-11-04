@@ -161,3 +161,9 @@ def test_demo_claims_no_lifted_surface():
     # demo must never win a capability fallback over LSE
     lifted = {"prices", "screener", "logos", "options", "flow", "calendar", "macro"}
     assert not (DemoProvider().capabilities() & lifted)
+
+
+def test_broker_capabilities():
+    from lse_terminal.engine.broker_hub import BrokerProvider
+    b = BrokerProvider.__new__(BrokerProvider)  # skip the hub
+    assert b.capabilities() == {"candles", "prices", "quote", "search"}
