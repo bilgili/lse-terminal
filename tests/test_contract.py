@@ -60,3 +60,20 @@ def test_fixture_row_has_required_keys(method):
         pytest.skip(f"fixture has no {method} row")
     missing = ROW_TYPES[method].__required_keys__ - set(row)
     assert not missing, f"{method} fixture lacks {sorted(missing)}"
+
+
+@pytest.mark.parametrize("method", sorted(ROW_TYPES))
+def test_required_keys_are_declared(method):
+    t = ROW_TYPES[method]
+    assert t.__required_keys__ <= set(t.__annotations__)
+
+
+def test_required_sets():
+    from lse_terminal.contracts import (
+        CalendarRow, ChainRow, FlowRow, PriceRow, UnderlyingRow)
+    assert ChainRow.__required_keys__ == {"contract_type", "strike", "expiry", "last_price"}
+    assert FlowRow.__required_keys__ == {"contract_type", "strike", "expiry", "premium"}
+    assert PriceRow.__required_keys__ == {"symbol", "price"}
+    assert CalendarRow.__required_keys__ == {"datetime", "event"}
+    assert UnderlyingRow.__required_keys__ == {"symbol"}
+    assert "underlying_price" in FlowRow.__optional_keys__

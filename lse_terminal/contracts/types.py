@@ -76,74 +76,81 @@ class Quote:
     ask: float | None = None
 
 
-class PriceRow(TypedDict, total=False):
+# Row types, one per data surface. Required keys are the keys the UI or
+# engine reads that the recorded LSE fixture (tests/fixtures/lse_rows.json)
+# carries; the compliance harness reads __required_keys__. A private
+# total=True base holds the required keys and the public total=False class
+# the optional ones, so type checkers and the runtime agree.
+class _PriceRequired(TypedDict):
     symbol: str
     price: float
+
+
+class PriceRow(_PriceRequired, total=False):
     bid: float | None
     ask: float | None
     ts: float
 
 
-class UnderlyingRow(TypedDict, total=False):
+class _UnderlyingRequired(TypedDict):
     symbol: str
+
+
+class UnderlyingRow(_UnderlyingRequired, total=False):
     name: str
 
 
-class ChainRow(TypedDict, total=False):
-    ticker: str
+class _ChainRequired(TypedDict):
     contract_type: str      # "call" | "put"
     strike: float
     expiry: str             # YYYY-MM-DD
     last_price: float
+
+
+class ChainRow(_ChainRequired, total=False):
+    ticker: str
+    # The chain feed carries greeks_underlying_price; the UI reads
+    # underlying_price and guards the miss. Declared so a source that has it can send it.
     underlying_price: float
     iv: float
     volume_today: float
     premium_today: float
 
 
-class FlowRow(TypedDict, total=False):
-    ticker: str
+class _FlowRequired(TypedDict):
     contract_type: str
     strike: float
     expiry: str
     premium: float
+
+
+class FlowRow(_FlowRequired, total=False):
+    ticker: str
     iv: float
+    underlying_price: float
 
 
-class CalendarRow(TypedDict, total=False):
+class _CalendarRequired(TypedDict):
     datetime: str
-    region_code: str
     event: str
+
+
+class CalendarRow(_CalendarRequired, total=False):
+    region_code: str
     actual: str | None
     consensus: str | None
     forecast: str | None
 
 
-class MacroCatalogRow(TypedDict, total=False):
+class MacroCatalogRow(TypedDict):
     symbol: str
     name: str
 
 
-class MacroSeriesRow(TypedDict, total=False):
+class MacroSeriesRow(TypedDict):
     date: str
     value: float
 
-
-# Required keys per surface: the keys the UI or engine reads that the
-# recorded LSE fixture (tests/fixtures/lse_rows.json) carries. total=False
-# lets a row carry extras; __required_keys__ is what the harness checks.
-# Set explicitly because Python 3.10 has no typing.Required.
-for _cls, _req in (
-    (PriceRow, {"symbol", "price"}),
-    (UnderlyingRow, {"symbol"}),
-    (ChainRow, {"contract_type", "strike", "expiry", "last_price"}),
-    (FlowRow, {"contract_type", "strike", "expiry", "premium"}),
-    (CalendarRow, {"datetime", "event"}),
-    (MacroCatalogRow, {"symbol", "name"}),
-    (MacroSeriesRow, {"date", "value"}),
-):
-    _cls.__required_keys__ = frozenset(_req)
-    _cls.__optional_keys__ = frozenset(_cls.__annotations__) - _cls.__required_keys__
 
 ROW_TYPES = {
     "prices": PriceRow,
