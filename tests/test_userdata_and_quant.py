@@ -408,3 +408,14 @@ def test_clean_prices_left_untouched(client):
     df = pd.read_csv(userdata.data_dir() / entry["file"])
     assert list(df["open"]) == [1.08123, 1.08125]
     assert list(df["close"]) == [1.08125, 1.08133]
+
+
+def test_window_bounds_are_half_open_epoch_strings(client):
+    client.post("/api/data/import",
+                json={"symbol": "MY:WIN", "name": "Win", "csv_text": rising_csv()})
+    from lse_terminal.providers.userdata import UserDataProvider
+    s, e = 1700000000 + 3600, 1700000000 + 5 * 3600
+    out = UserDataProvider().candles("MY:WIN", "1h", limit=500, start=str(s), end=str(e))
+    ts = set(out["ts"])
+    assert s in ts and e not in ts
+    assert e - 3600 in ts

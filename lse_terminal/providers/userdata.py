@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from lse_terminal.contracts import CANDLE_COLUMNS, TIMEFRAME_SECONDS, Instrument, NotSupported, Provider
+from lse_terminal.contracts import CANDLE_COLUMNS, TIMEFRAME_SECONDS, Instrument, NotSupported, Provider, to_epoch
 from lse_terminal.engine import config as cfg
 
 # Imported files are OHLC bars; there is no honest way to split a bar back
@@ -615,10 +615,11 @@ class UserDataProvider(Provider):
         # datasets were previously served whole-file-newest-N only, which the
         # chart tolerated; the manual backtester's windowed replay load needs
         # real bounds.
-        if start:
-            df = df[df["ts"] >= int(pd.Timestamp(start, tz="UTC").timestamp())]
-        if end:
-            df = df[df["ts"] <= int(pd.Timestamp(end, tz="UTC").timestamp())]
+        s, e = to_epoch(start), to_epoch(end)
+        if s is not None:
+            df = df[df["ts"] >= s]
+        if e is not None:
+            df = df[df["ts"] < e]
         # Start-anchored queries page FORWARD (oldest N from start); everything
         # else returns the newest N. The frontend's pagination depends on this.
         if limit and len(df) > limit:

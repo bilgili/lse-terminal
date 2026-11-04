@@ -77,3 +77,8 @@ def test_required_sets():
     assert CalendarRow.__required_keys__ == {"datetime", "event"}
     assert UnderlyingRow.__required_keys__ == {"symbol"}
     assert "underlying_price" in FlowRow.__optional_keys__
+
+
+def test_timeframe_table_is_frozen():
+    with pytest.raises(TypeError):
+        TIMEFRAME_SECONDS["2m"] = 120

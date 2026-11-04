@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TypedDict
+from types import MappingProxyType
+from typing import Mapping, TypedDict
 
 # The candle DataFrame contract. Every provider returns exactly these columns,
 # in this order. `ts` is the bar-open time as integer epoch seconds (UTC);
@@ -15,11 +16,11 @@ CANDLE_COLUMNS = ["ts", "open", "high", "low", "close", "volume"]
 # Bar length per fixed-length timeframe, in UI display order. "tick" is not
 # here: a tick has no length, and the cache treats any label outside this
 # table as not cacheable. Providers that serve tick add it themselves.
-TIMEFRAME_SECONDS: dict[str, int] = {
+TIMEFRAME_SECONDS: Mapping[str, int] = MappingProxyType({
     "1s": 1, "30s": 30,
     "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
     "1h": 3600, "4h": 14400, "1d": 86400, "1w": 604800,
-}
+})
 
 
 def to_epoch(bound: int | float | str | None) -> int | None:
