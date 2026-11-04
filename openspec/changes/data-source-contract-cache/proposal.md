@@ -5,7 +5,8 @@ The terminal has a `Provider` contract and a plugin loader, but only candles, se
 ## What Changes
 
 - Lift the six LSE-only surfaces into the `Provider` base class as optional methods. Each raises `NotSupported` by default. `capabilities()` reports the ones a provider overrides.
-- Add one source resolver in the engine. A route takes an optional `provider` query parameter. Without it, the engine picks the first configured source that has the capability. The resolver replaces every `reg.get("lse")` except the databank download, which stays an LSE product feature.
+- Add one source resolver in the engine. A global route (no symbol in the answer) takes an optional `provider` query parameter and falls back to the first configured source that has the capability. A symbol-scoped route (prices, chain, macro series, tape for one underlying) requires `provider`, because a fallback would send one source's symbol to another. The resolver replaces every `reg.get("lse")` except the databank download, which stays an LSE product feature.
+- Add four candle clauses to the contract that the cache depends on: half-open bounds, a short answer is complete, answers are contiguous, failures raise. Row shapes become `TypedDict` classes built from a recorded LSE fixture.
 - Move the timeframe-to-seconds table into the contract module. `demo` and `userdata` drop their private copies.
 - Default `is_custom = True` for every provider that arrives through an entry point, so the directory gate never hides a plugin.
 - Add a read-through cache in front of every cacheable provider. SQLite file, closed bars only, coverage intervals, per-key fill lock, TTL snapshots for the dict-shaped surfaces. The four TTL dicts in the server delete. One switch turns the cache off.
@@ -30,7 +31,9 @@ The terminal has a `Provider` contract and a plugin loader, but only candles, se
 - `lse_terminal/engine/server.py`: one resolver, twelve route edits, four cache dicts removed, two cache routes added.
 - `lse_terminal/providers/demo.py`, `userdata.py`: drop the private timeframe table, set `cacheable = False`.
 - `lse_terminal/engine/broker_hub.py`: `is_broker` becomes a contract attribute.
-- `lse_terminal/testing.py`: per-capability checks.
+- `lse_terminal/testing.py`: per-capability checks and candle clause checks.
+- `tests/fixtures/lse_rows.json`: one recorded row per LSE surface, the source of the required keys.
+- `openspec/changes/data-source-contract-cache/design.tla`, `design*.cfg`: the model of the cache rules, run in the review gate.
 - `lse_terminal/ui/static/app.js`: one helper, nine call sites.
 - `lse_terminal/cli.py`: `lset cache clear|stats`.
 - New dependency: none. SQLite is stdlib.
