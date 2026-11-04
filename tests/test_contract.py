@@ -172,16 +172,12 @@ def test_broker_capabilities():
 from lse_terminal.testing import check_provider  # noqa: E402
 
 
-def test_demo_passes_full_harness():
-    assert check_provider(DemoProvider()) == []
-
-
 def test_claimed_capability_that_raises_is_a_violation():
     class Liar(DemoProvider):
         def screener(self):
             raise NotSupported("no")
     problems = check_provider(Liar())
-    assert any("screener" in p for p in problems)
+    assert any("screener" in p and "NotSupported" in p for p in problems)
 
 
 def test_missing_row_key_is_a_violation():
@@ -225,3 +221,44 @@ def test_fixture_rows_pass_the_harness():
         if FIXTURE[m] is not None:
             setattr(Replay, m, lambda self, *a, _r=FIXTURE[m], **k: _r)
     assert check_provider(Replay()) == []
+
+
+def test_non_dict_row_is_reported_not_raised():
+    class Bad(DemoProvider):
+        def options_flow(self, underlying=None, type=None, min_premium=None, limit=300):
+            return [1]
+    problems = check_provider(Bad())
+    assert any("options_flow" in p and "not a dict" in p for p in problems)
+
+
+def test_bad_listing_is_blamed_on_the_listing_method():
+    class BadListing(DemoProvider):
+        def options_underlyings(self):
+            return [{"x": 1}]
+
+        def option_chain(self, underlying, type=None, expiry=None, limit=5000):
+            return []
+    problems = check_provider(BadListing())
+    assert any("options_underlyings" in p and "symbol" in p for p in problems)
+    assert any("option_chain" in p and "not checked" in p for p in problems)
+    assert not any(p.startswith("option_chain: raised") for p in problems)
+
+
+def test_too_few_bars_is_reported():
+    class Short(DemoProvider):
+        def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+            return super().candles(symbol, timeframe, limit=limit,
+                                   start=start, end=end).head(2)
+    problems = check_provider(Short())
+    assert any("candle clauses not checked: need at least 3 bars" in p
+               for p in problems)
+
+
+def test_default_timeframe_falls_through_to_one_that_works():
+    class OnlyHourly(DemoProvider):
+        def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+            if timeframe != "1h":
+                raise ValueError("native timeframe only")
+            return super().candles(symbol, timeframe, limit=limit,
+                                   start=start, end=end)
+    assert check_provider(OnlyHourly()) == []

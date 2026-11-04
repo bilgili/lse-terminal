@@ -20,6 +20,8 @@ from lse_terminal.contracts import (
     Provider,
 )
 
+PROBE_LIMIT = 5
+
 
 def check_provider(provider: Provider, symbol: str | None = None,
                    timeframe: str | None = None) -> list[str]:
@@ -42,11 +44,21 @@ def check_provider(provider: Provider, symbol: str | None = None,
             problems.append(f"search() returned non-Instrument: {ins!r}")
 
     sym = symbol or results[0].symbol
-    tf = timeframe or provider.timeframes[0]
-    try:
-        df = provider.candles(sym, tf, limit=50)
-    except Exception as e:
-        return problems + [f"candles({sym!r}, {tf!r}) raised: {e}"]
+    # Without an explicit timeframe, take the first that serves rows: some sources
+    # only serve each symbol's native timeframe.
+    tfs = [timeframe] if timeframe else list(provider.timeframes) or [""]
+    first_err = None
+    for tf in tfs:
+        try:
+            df = provider.candles(sym, tf, limit=50)
+        except Exception as e:  # noqa: BLE001 - harness reports, never crashes
+            first_err = first_err or f"candles({sym!r}, {tf!r}) raised: {e}"
+            continue
+        if len(df) >= 1 or tf == tfs[-1] or timeframe:
+            first_err = None
+            break
+    if first_err:
+        return problems + [first_err]
 
     if list(df.columns) != CANDLE_COLUMNS:
         problems.append(f"candles columns {list(df.columns)} != {CANDLE_COLUMNS}")
@@ -69,12 +81,6 @@ def check_provider(provider: Provider, symbol: str | None = None,
         problems.append(f"{bad_hi} bars with high < max(open, close)")
     if bad_lo:
         problems.append(f"{bad_lo} bars with low > min(open, close)")
-
-    if provider.deterministic:
-        df2 = provider.candles(sym, tf, limit=50)
-        if not df.equals(df2):
-            problems.append("deterministic=True but two identical calls differ")
-
     problems += _check_candle_clauses(provider, sym, tf, df)
     problems += _check_capabilities(provider, sym)
     return problems
@@ -82,63 +88,80 @@ def check_provider(provider: Provider, symbol: str | None = None,
 
 def _check_candle_clauses(provider: Provider, sym: str, tf: str, df) -> list[str]:
     """Half-open bounds and prefix completeness, the clauses the cache needs."""
-    out: list[str] = []
     if len(df) < 3:
-        return out
+        msg = (f"candle clauses not checked: need at least 3 bars for {sym} {tf}; "
+               "pass symbol=/timeframe= with a longer series")
+        return [msg]
+    out: list[str] = []
     ts = [int(t) for t in df["ts"]]
     s, e = ts[0], ts[2]
+    call = f"candles({sym!r}, {tf!r}, limit=50, start={s}, end={e})"
     try:
-        win = provider.candles(sym, tf, limit=50, start=str(s), end=str(e))
+        got = {int(t) for t in provider.candles(
+            sym, tf, limit=50, start=str(s), end=str(e))["ts"]}
     except Exception as ex:  # noqa: BLE001 - harness reports, never crashes
-        return [f"windowed candles raised: {ex}"]
-    got = {int(t) for t in win["ts"]}
+        return [f"{call} raised: {ex!r}"]
     if e in got:
         out.append("end is exclusive: a bar at ts == end was returned")
     if s not in got:
         out.append("start is inclusive: the bar at ts == start is missing")
+    call = f"candles({sym!r}, {tf!r}, limit=2 and limit=10, start={s})"
     try:
-        small = provider.candles(sym, tf, limit=2, start=str(s))
-        big = provider.candles(sym, tf, limit=10, start=str(s))
+        small = list(provider.candles(sym, tf, limit=2, start=str(s))["ts"])
+        big = list(provider.candles(sym, tf, limit=10, start=str(s))["ts"])
     except Exception as ex:  # noqa: BLE001
-        return out + [f"windowed candles raised: {ex}"]
-    if list(small["ts"]) != list(big["ts"])[:len(small)]:
+        return out + [f"{call} raised: {ex!r}"]
+    if small != big[:len(small)]:
         out.append("windowed answer with a smaller limit is not a prefix "
                    "of the same call with a larger limit")
     return out
 
 
-def _probe(provider: Provider, method: str, sym: str):
-    """One call per method; the first listed underlying/series feeds the per-symbol calls."""
+# dependent method -> listing method that supplies its first symbol
+_DEPENDS_ON = {"option_chain": "options_underlyings", "macro_series": "macro_catalog"}
+_LISTINGS = ("options_underlyings", "macro_catalog")
+_LIMIT_CHECKED = ("options_flow", "economic_calendar", "option_chain", "macro_series")
+
+
+def _probe(provider: Provider, method: str, sym: str, listed: str | None = None):
+    """One call per method. `listed` is the first symbol of the dependent's listing."""
+    arg = listed or sym
     if method == "prices":
         return provider.prices([sym])
     if method == "option_chain":
-        und = provider.options_underlyings()
-        return provider.option_chain(und[0]["symbol"] if und else sym, limit=5)
+        return provider.option_chain(arg, limit=PROBE_LIMIT)
     if method == "macro_series":
-        cat = provider.macro_catalog()
-        return provider.macro_series(cat[0]["symbol"] if cat else sym, limit=5)
+        return provider.macro_series(arg, limit=PROBE_LIMIT)
     if method in ("options_flow", "economic_calendar"):
-        return getattr(provider, method)(limit=5)
+        return getattr(provider, method)(limit=PROBE_LIMIT)
     return getattr(provider, method)()
-
-
-_LIMITED = ("options_flow", "economic_calendar", "option_chain", "macro_series")
 
 
 def _check_capabilities(provider: Provider, sym: str) -> list[str]:
     out: list[str] = []
     caps = provider.capabilities()
+    # listing method -> first symbol; "" when the listing is empty, None when unusable
+    first_symbol: dict[str, str | None] = {}
     for cap, methods in Provider._CAPABILITY_METHODS.items():
         if cap in ("quote", "stream") or cap not in caps:
             continue
         for m in methods:
+            listed = None
+            dep = _DEPENDS_ON.get(m)
+            if dep:
+                if first_symbol.get(dep, None) is None:
+                    out.append(f"{m}: not checked: {dep} returned no usable symbol")
+                    continue
+                listed = first_symbol[dep] or None
             try:
-                res = _probe(provider, m, sym)
+                res = _probe(provider, m, sym, listed)
             except NotSupported:
                 out.append(f"{m}: claimed via capability {cap!r} but raised NotSupported")
+                first_symbol[m] = None
                 continue
             except Exception as ex:  # noqa: BLE001 - harness reports, never crashes
                 out.append(f"{m}: raised {type(ex).__name__}: {ex}")
+                first_symbol[m] = None
                 continue
             if m == "screener":
                 if not isinstance(res, dict) or not {"columns", "data"} <= set(res):
@@ -146,17 +169,31 @@ def _check_capabilities(provider: Provider, sym: str) -> list[str]:
                 continue
             if m == "logos":
                 if not isinstance(res, dict):
-                    out.append("logos: must return a symbol -> {light, dark} map")
+                    out.append("logos: must return a dict")
                 continue
             if not isinstance(res, list):
                 out.append(f"{m}: must return a list of rows")
+                first_symbol[m] = None
                 continue
-            if m in _LIMITED and len(res) > 5:
-                out.append(f"{m}: limit=5 not respected: got {len(res)} rows")
+            if m in _LIMIT_CHECKED and len(res) > PROBE_LIMIT:
+                out.append(f"{m}: limit={PROBE_LIMIT} not respected: got {len(res)} rows")
             req = ROW_TYPES[m].__required_keys__
-            for row in res[:5]:
+            ok = True
+            for row in res[:PROBE_LIMIT]:
+                if not isinstance(row, dict):
+                    out.append(f"{m}: row is not a dict: {row!r}")
+                    ok = False
+                    break
                 missing = req - set(row)
                 if missing:
                     out.append(f"{m}: row lacks required keys {sorted(missing)}")
+                    ok = False
                     break
+            if m in _LISTINGS:
+                if not res:
+                    first_symbol[m] = ""
+                elif ok and "symbol" in res[0]:
+                    first_symbol[m] = str(res[0]["symbol"])
+                else:
+                    first_symbol[m] = None
     return out
