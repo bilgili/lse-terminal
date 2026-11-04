@@ -1,6 +1,12 @@
+import json
+from pathlib import Path
+
 import pytest
 
-from lse_terminal.contracts import TIMEFRAME_SECONDS, to_epoch
+from lse_terminal.contracts import ROW_TYPES, TIMEFRAME_SECONDS, to_epoch
+
+FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "lse_rows.json").read_text())
 
 
 def test_timeframe_table_has_no_tick():
@@ -45,3 +51,12 @@ def test_to_epoch_rejects_bool():
 def test_to_epoch_names_bad_input(bad):
     with pytest.raises(ValueError, match="unparseable bound"):
         to_epoch(bad)
+
+
+@pytest.mark.parametrize("method", sorted(ROW_TYPES))
+def test_fixture_row_has_required_keys(method):
+    row = FIXTURE[method]
+    if row is None:
+        pytest.skip(f"fixture has no {method} row")
+    missing = ROW_TYPES[method].__required_keys__ - set(row)
+    assert not missing, f"{method} fixture lacks {sorted(missing)}"

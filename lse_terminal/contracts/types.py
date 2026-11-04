@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TypedDict
 
 # The candle DataFrame contract. Every provider returns exactly these columns,
 # in this order. `ts` is the bar-open time as integer epoch seconds (UTC);
@@ -73,3 +74,83 @@ class Quote:
     ts: float
     bid: float | None = None
     ask: float | None = None
+
+
+class PriceRow(TypedDict, total=False):
+    symbol: str
+    price: float
+    bid: float | None
+    ask: float | None
+    ts: float
+
+
+class UnderlyingRow(TypedDict, total=False):
+    symbol: str
+    name: str
+
+
+class ChainRow(TypedDict, total=False):
+    ticker: str
+    contract_type: str      # "call" | "put"
+    strike: float
+    expiry: str             # YYYY-MM-DD
+    last_price: float
+    underlying_price: float
+    iv: float
+    volume_today: float
+    premium_today: float
+
+
+class FlowRow(TypedDict, total=False):
+    ticker: str
+    contract_type: str
+    strike: float
+    expiry: str
+    premium: float
+    iv: float
+
+
+class CalendarRow(TypedDict, total=False):
+    datetime: str
+    region_code: str
+    event: str
+    actual: str | None
+    consensus: str | None
+    forecast: str | None
+
+
+class MacroCatalogRow(TypedDict, total=False):
+    symbol: str
+    name: str
+
+
+class MacroSeriesRow(TypedDict, total=False):
+    date: str
+    value: float
+
+
+# Required keys per surface: the keys the UI or engine reads that the
+# recorded LSE fixture (tests/fixtures/lse_rows.json) carries. total=False
+# lets a row carry extras; __required_keys__ is what the harness checks.
+# Set explicitly because Python 3.10 has no typing.Required.
+for _cls, _req in (
+    (PriceRow, {"symbol", "price"}),
+    (UnderlyingRow, {"symbol"}),
+    (ChainRow, {"contract_type", "strike", "expiry", "last_price"}),
+    (FlowRow, {"contract_type", "strike", "expiry", "premium"}),
+    (CalendarRow, {"datetime", "event"}),
+    (MacroCatalogRow, {"symbol", "name"}),
+    (MacroSeriesRow, {"date", "value"}),
+):
+    _cls.__required_keys__ = frozenset(_req)
+    _cls.__optional_keys__ = frozenset(_cls.__annotations__) - _cls.__required_keys__
+
+ROW_TYPES = {
+    "prices": PriceRow,
+    "options_underlyings": UnderlyingRow,
+    "option_chain": ChainRow,
+    "options_flow": FlowRow,
+    "economic_calendar": CalendarRow,
+    "macro_catalog": MacroCatalogRow,
+    "macro_series": MacroSeriesRow,
+}
