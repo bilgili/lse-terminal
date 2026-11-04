@@ -1214,6 +1214,7 @@ class BrokerProvider(Provider):
     """
 
     is_broker = True
+    cacheable = False
 
     def __init__(self, hub, broker: str, label: str = "", timeframes=None):
         self.hub = hub

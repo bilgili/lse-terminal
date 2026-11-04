@@ -50,3 +50,16 @@ def test_stream_emits_ticks():
     ticks = asyncio.run(take_three())
     assert all(t["symbol"] in ("DEMO:BTC", "DEMO:VIX") for t in ticks)
     assert all(t["price"] > 0 for t in ticks)
+
+
+def test_demo_keeps_tick():
+    assert "tick" in DemoProvider().timeframes
+
+
+def test_demo_end_is_exclusive():
+    p = DemoProvider()
+    df = p.candles("DEMO:SPX", "1h", limit=10)
+    last = int(df["ts"].iloc[-1])
+    out = p.candles("DEMO:SPX", "1h", limit=10, start=str(last - 3600), end=str(last))
+    assert last not in set(out["ts"])
+    assert last - 3600 in set(out["ts"])

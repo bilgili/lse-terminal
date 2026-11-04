@@ -20,19 +20,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from lse_terminal.contracts import CANDLE_COLUMNS, Instrument, NotSupported, Provider
+from lse_terminal.contracts import CANDLE_COLUMNS, TIMEFRAME_SECONDS, Instrument, NotSupported, Provider
 from lse_terminal.engine import config as cfg
 
-_TF_SECONDS = {
-    # No "tick" here: imported files are OHLC bars and there is no honest
-    # way to divide a bar back into trades. Sub-minute entries serve users
-    # whose imports ARE sub-minute; a 1m-native import asked for 1s hits
-    # the existing divisibility refusal below, same as 1h-native asked
-    # for 1m always has.
-    "1s": 1, "30s": 30,
-    "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
-    "1h": 3600, "4h": 14400, "1d": 86400, "1w": 604800,
-}
+# Imported files are OHLC bars; there is no honest way to split a bar back
+# into trades, so there is no "tick". A 1m-native import asked for 1s hits
+# the divisibility refusal below, same as 1h-native asked for 1m always has.
+_TF_SECONDS = TIMEFRAME_SECONDS
 
 _TIME_NAMES = ("ts", "time", "timestamp", "date", "datetime")
 _FIELD_ALIASES = {
@@ -573,6 +567,7 @@ class UserDataProvider(Provider):
     title = "My Data"
     timeframes = list(_TF_SECONDS)
     deterministic = True
+    cacheable = False
 
     def configured(self) -> bool:
         return True  # always available; just empty until an import
