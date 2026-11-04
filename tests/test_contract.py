@@ -1,9 +1,12 @@
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
-from lse_terminal.contracts import ROW_TYPES, TIMEFRAME_SECONDS, to_epoch
+from lse_terminal.contracts import (
+    ROW_TYPES, TIMEFRAME_SECONDS, NotSupported, Provider, to_epoch)
+from lse_terminal.providers import DemoProvider, LseProvider, UserDataProvider
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "lse_rows.json").read_text())
@@ -82,3 +85,79 @@ def test_required_sets():
 def test_timeframe_table_is_frozen():
     with pytest.raises(TypeError):
         TIMEFRAME_SECONDS["2m"] = 120
+
+
+LIFTED = ["prices", "screener", "logos", "options_underlyings", "option_chain",
+          "options_flow", "economic_calendar", "macro_catalog", "macro_series"]
+_ARGS = {"prices": (["X"],), "option_chain": ("X",), "macro_series": ("X",)}
+
+
+class Bare(Provider):
+    name = "bare"
+
+    def search(self, query="", limit=50):
+        return []
+
+    def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+
+
+def test_attributes_defaults():
+    assert Bare.is_custom is False
+    assert Bare.is_broker is False
+    assert Bare.cacheable is True
+    assert Bare.settle_seconds == 60
+    assert dict(Bare.snapshot_ttl) == {}
+
+
+def test_snapshot_ttl_default_is_read_only():
+    with pytest.raises(TypeError):
+        Bare.snapshot_ttl["option_chain"] = 1
+
+
+@pytest.mark.parametrize("method", LIFTED)
+def test_default_raises_not_supported(method):
+    with pytest.raises(NotSupported):
+        getattr(Bare(), method)(*_ARGS.get(method, ()))
+
+
+def test_bare_capabilities():
+    assert Bare().capabilities() == {"search", "candles"}
+
+
+def test_partial_options_is_not_options():
+    class Half(Bare):
+        def option_chain(self, underlying, type=None, expiry=None, limit=5000):
+            return []
+    assert "options" not in Half().capabilities()
+
+
+def test_full_surface_capabilities():
+    class Full(Bare):
+        def quote(self, symbol):
+            return None
+
+        async def stream(self, symbols):
+            yield {}
+    for m in LIFTED:
+        setattr(Full, m, lambda self, *a, **k: [])
+    assert Full().capabilities() == {
+        "search", "candles", "quote", "stream", "prices", "screener", "logos",
+        "options", "flow", "calendar", "macro"}
+
+
+def test_lse_claims_every_lifted_surface():
+    caps = LseProvider(api_key="x").capabilities()
+    assert {"prices", "screener", "logos", "options", "flow",
+            "calendar", "macro"} <= caps
+
+
+def test_local_sources_opt_out_of_cache():
+    assert DemoProvider.cacheable is False
+    assert UserDataProvider.cacheable is False
+
+
+def test_demo_claims_no_lifted_surface():
+    # demo must never win a capability fallback over LSE
+    lifted = {"prices", "screener", "logos", "options", "flow", "calendar", "macro"}
+    assert not (DemoProvider().capabilities() & lifted)
