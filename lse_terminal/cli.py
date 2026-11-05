@@ -122,20 +122,20 @@ def _utf8_streams(sys_mod) -> None:
             pass  # not a real text stream (pythonw, a closed fd)
 
 
-def _engine_port(default: int) -> int:
-    """Port of the running engine from config_dir()/engine.json, else default."""
-    import json
-
+def _engine_files() -> list:
+    """Per-process engine files, config_dir()/engines/engine-<pid>.json."""
     from lse_terminal.engine.config import config_dir
-    try:
-        return int(json.loads((config_dir() / "engine.json").read_text())["port"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return default
+    return sorted((config_dir() / "engines").glob("engine-*.json"))
 
 
 def _cache_cmd(argv: list[str]) -> int:
-    """`lset cache clear|stats`: through the running engine (it holds the
-    key locks), straight to the file only when no engine answers."""
+    """`lset cache clear|stats`: through a running engine (it holds the key
+    locks), straight to the file only when no engine answers.
+
+    Liveness is HTTP reachability, never os.kill(pid, 0): on Windows that
+    call terminates the process. A refused connection means the engine is
+    gone (its stale file is deleted). A timeout means a live but hung
+    engine: stop, and leave the file alone."""
     import json
     import urllib.error
     import urllib.parse
@@ -150,19 +150,45 @@ def _cache_cmd(argv: list[str]) -> int:
     a = ap.parse_args(argv)
     q = urllib.parse.urlencode({k: v for k, v in (
         ("provider", a.provider), ("symbol", a.symbol), ("timeframe", a.timeframe)) if v})
-    port = _engine_port(a.port)
-    url = f"http://127.0.0.1:{port}/api/cache" + ("/stats" if a.action == "stats" else "")
-    req = urllib.request.Request(url + (f"?{q}" if q and a.action == "clear" else ""),
-                                 method="GET" if a.action == "stats" else "DELETE")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            print(r.read().decode())
-            return 0
-    except urllib.error.HTTPError as e:      # an engine answered: never touch the file
-        print(e.read().decode(errors="replace"))
-        return 1
-    except urllib.error.URLError:
-        pass   # no engine answers: no reader can be in flight, use the file
+
+    def ask(port: int):
+        """(code, text) when an engine answered, None when it refused."""
+        url = f"http://127.0.0.1:{port}/api/cache" + ("/stats" if a.action == "stats" else "")
+        req = urllib.request.Request(url + (f"?{q}" if q and a.action == "clear" else ""),
+                                     method="GET" if a.action == "stats" else "DELETE")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return 0, r.read().decode()
+        except urllib.error.HTTPError as e:      # an engine answered: never touch the file
+            return 1, e.read().decode(errors="replace")
+        except (TimeoutError, urllib.error.URLError) as e:
+            exc = e.reason if isinstance(e, urllib.error.URLError) else e
+            if isinstance(exc, TimeoutError):    # live but hung: never fall through
+                return 1, (f"engine on port {port} did not answer; not touching the "
+                           "cache file while it may be running")
+            return None
+
+    ports = []
+    for f in _engine_files():
+        try:
+            ports.append((f, int(json.loads(f.read_text())["port"])))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    for f, port in ports:
+        res = ask(port)
+        if res is None:
+            try:
+                f.unlink()                       # refused: the engine is gone
+            except OSError:
+                pass
+            continue
+        print(res[1])
+        return res[0]
+    res = ask(a.port)
+    if res is not None:
+        print(res[1])
+        return res[0]
+    # No engine answers: no reader can be in flight, use the file.
     from lse_terminal.engine.cache import CandleCache
     from lse_terminal.engine.cache_store import SqliteStore
     from lse_terminal.engine.config import config_dir
@@ -170,8 +196,7 @@ def _cache_cmd(argv: list[str]) -> int:
     if a.action == "stats":
         print(json.dumps(st.stats()))
     else:
-        print(json.dumps({"cleared": CandleCache(st, st).clear(
-            a.provider, a.symbol, a.timeframe)}))
+        print(json.dumps(CandleCache(st, st).clear(a.provider, a.symbol, a.timeframe)))
     return 0
 
 
@@ -313,14 +338,15 @@ def main(argv: list[str] | None = None) -> int:
         # mac/windows and would wrongly suppress the open there).
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
     print(f"LSE Terminal -> {url}")
-    # `lset cache` finds this engine through the file (the desktop app picks
-    # a free port, not 7787). Removed on normal exit; a stale file after a
-    # crash only costs one refused connection before the file fallback.
+    # `lset cache` finds this engine through its own file (the desktop app
+    # picks a free port, not 7787). Each process owns engines/engine-<pid>.json
+    # and removes only that file on exit; a stale file after a crash costs one
+    # refused connection, and the CLI deletes it then.
     import json
     import os
 
     from lse_terminal.engine.config import config_dir
-    info = config_dir() / "engine.json"
+    info = config_dir() / "engines" / f"engine-{os.getpid()}.json"
     try:
         info.parent.mkdir(parents=True, exist_ok=True)
         info.write_text(json.dumps({"port": args.port, "pid": os.getpid()}))

@@ -768,13 +768,19 @@ def create_app() -> FastAPI:
     def cache_stats():
         deny_hosted()
         c = app.state.cache
-        return {"enabled": c.store is not None, **(c.store.stats() if c.store else {})}
+        try:
+            return {"enabled": c.store is not None, **(c.store.stats() if c.store else {})}
+        except sqlite3.Error as e:
+            raise HTTPException(503, f"cache store failed: {e}")
 
     @app.delete("/api/cache")
     def cache_clear(provider: str | None = None, symbol: str | None = None,
                     timeframe: str | None = None):
         deny_hosted()
-        return {"cleared": app.state.cache.clear(provider, symbol, timeframe)}
+        try:
+            return app.state.cache.clear(provider, symbol, timeframe)
+        except sqlite3.Error as e:
+            raise HTTPException(503, f"cache store failed: {e}")
 
     @app.get("/api/prices")
     def prices(response: Response, symbols: str, provider: str | None = None):
@@ -6953,6 +6959,14 @@ def create_app() -> FastAPI:
         # Replace the provider so the new key takes effect without a restart.
         from lse_terminal.providers import LseProvider
         reg.register(LseProvider(api_key=key))
+        if old_key != key:
+            # Rows cached under the old key (or none) may carry data the new
+            # key's plan does not entitle. Same key again keeps the cache;
+            # sign-out (clear_key) does not clear, pass-through hides it.
+            try:
+                app.state.cache.clear(provider="lse")
+            except Exception:
+                pass  # a cache hiccup must never block saving the key
         if old_key and old_key != key:
             # A pinned demo account belongs to the OLD key's login; carried
             # across, the adapter's strict binding refuses to connect (no

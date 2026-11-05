@@ -101,6 +101,14 @@ For a call without `start` and without `end`, under the key lock, when the newes
 - **WHEN** a cold key has 300 bars at the source and a call asks `limit=5000`
 - **THEN** the wrapper records coverage from `HISTORY` to `edge`, and a later call with `limit=1000` is served from the store and the tail with no call that has `limit` alone
 
+#### Scenario: Short history heals within 24 h
+- **WHEN** a cold key answers 300 bars for `limit=5000`, and the vendor later backfills older bars
+- **THEN** coverage `[first_ts, edge)` is real, the range `[HISTORY, first_ts)` expires after 24 h, and the next call after expiry fetches the older bars
+
+#### Scenario: Limit below 1 bypasses
+- **WHEN** a call asks `limit=0`
+- **THEN** the call passes to the source and the store is not touched
+
 #### Scenario: Hit test counts only the run at the edge
 - **WHEN** coverage holds `[0, 5)` with 4 stored bars and `[6, 7)` with 1 stored bar, and a call asks `limit=4`
 - **THEN** the wrapper does not splice across tick 5; the pool holds only the run `[6, 7)` and the tail, and with fewer than 4 bars the call takes the newest-N path
@@ -162,7 +170,7 @@ The wrapper SHALL cache `options_underlyings`, `option_chain`, `options_flow`, `
 - **THEN** the second call reaches the provider, and no `snapshots` row holds the empty map
 
 ### Requirement: Invalidation
-`DELETE /api/cache` with optional `provider`, `symbol`, `timeframe` SHALL drop matching rows from `bars` and `coverage` under the matching locks. It SHALL drop `snapshots` rows, for the named provider or for all providers, only when the call gives no `symbol` and no `timeframe`. `GET /api/cache/stats` SHALL return row counts per table and the file size. Both routes SHALL be local-mode only. The engine process SHALL write `config_dir()/engine.json` with `{"port", "pid"}` at start. `lset cache clear` SHALL read the port from that file, SHALL fall back to `--port`, SHALL call `DELETE /api/cache` on the engine at that port, and SHALL open the file directly only when no engine answers.
+`DELETE /api/cache` with optional `provider`, `symbol`, `timeframe` SHALL drop matching rows from `bars` and `coverage` under the matching locks. It SHALL drop `snapshots` rows, for the named provider or for all providers, only when the call gives no `symbol` and no `timeframe`. `GET /api/cache/stats` SHALL return row counts per table and the file size. Both routes SHALL be local-mode only. `DELETE /api/cache` SHALL return `{"cleared": n, "skipped": [[provider, symbol, tf], ...]}`; `skipped` lists the keys whose lock timed out. Both routes SHALL answer HTTP 503 with a short message when the store raises `sqlite3.Error`. Each engine process SHALL write `config_dir()/engines/engine-<pid>.json` with `{"port", "pid"}` before it serves, and SHALL remove only its own file on exit. `lset cache` SHALL ask each listed engine over HTTP with a 10 s timeout. The first engine that answers SHALL handle the command. A refused connection SHALL delete that engine file. A timeout SHALL print a message and exit 1 without opening the cache file. The CLI SHALL open the file directly only when no engine answers, none timed out, and `--port` also refuses.
 
 #### Scenario: Clear one key
 - **WHEN** `DELETE /api/cache?provider=lse&symbol=AAPL&timeframe=1d` runs
@@ -174,7 +182,23 @@ The wrapper SHALL cache `options_underlyings`, `option_chain`, `options_flow`, `
 
 #### Scenario: CLI finds the desktop engine
 - **WHEN** the desktop app runs the engine on port 7800 and `lset cache clear` runs without `--port`
-- **THEN** the CLI reads port 7800 from `engine.json` and calls `DELETE /api/cache` on that engine, and does not open the file
+- **THEN** the CLI reads port 7800 from `engines/engine-<pid>.json` and calls `DELETE /api/cache` on that engine, and does not open the file
+
+#### Scenario: CLI with two engine files
+- **WHEN** two engine files exist, the first engine refuses the connection, and the second answers
+- **THEN** the CLI deletes the first file and uses the second engine
+
+#### Scenario: CLI with a hung engine
+- **WHEN** an engine file lists an engine that times out
+- **THEN** the CLI prints that the engine did not answer, exits 1, leaves the engine file and does not open the cache file
+
+#### Scenario: Cache routes on store failure
+- **WHEN** the store raises `sqlite3.Error` during `GET /api/cache/stats` or `DELETE /api/cache`
+- **THEN** the route answers HTTP 503 with a short message
+
+#### Scenario: Key change clears LSE rows
+- **WHEN** the user saves an LSE key that differs from the previous one, or saves a key when none was set
+- **THEN** the `lse` rows are cleared; saving the same key again, or signing out, clears nothing
 
 ### Requirement: Regression cases from the model
 `tests/test_cache.py` SHALL carry one test per counter-example in `design-review.md`: `cx_tail`, `cx_edge`, `cx_trunc`, `cx_count`, `cx_lock`, `cx_irr`, `cx_transient`, `cx_skip`, `cx_lag`, `cx_restate`. The last three SHALL assert the documented, accepted outcome.

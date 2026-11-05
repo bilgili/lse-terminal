@@ -54,7 +54,7 @@ holds closed candles and the results of six snapshot methods: options
 underlyings, chain, flow, economic calendar, macro catalog and macro series.
 Set `LSE_TERMINAL_CACHE=off` to turn the file off. Run `lset cache clear
 [--provider P --symbol S --timeframe T]` to delete cached data. Run `lset
-cache stats` to see its size. A restated bar stays in the cache until you
+cache stats` to see its size. Each running engine writes `engines/engine-<pid>.json` in the config directory so the command finds it. A restated bar stays in the cache until you
 clear it.
 
 ## Key

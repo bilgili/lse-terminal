@@ -385,3 +385,37 @@ def test_unopenable_store_fails_open(tmp_path, monkeypatch, stub):
     c.get("/api/options/chain", params=q)
     c.get("/api/options/chain", params=q)
     assert stub.calls == {"option_chain": 1}
+
+
+def test_key_change_clears_lse_rows_same_key_does_not(client, monkeypatch):
+    import lse_terminal.providers.lse as lse_mod
+    monkeypatch.setattr(lse_mod, "verify_key", lambda k, timeout=8.0: (True, ""))
+    calls = []
+    monkeypatch.setattr(client.app.state.cache, "clear",
+                        lambda **kw: calls.append(kw) or {"cleared": 0, "skipped": []})
+    post = lambda k: client.post("/api/config/lse_key", json={"key": k}).status_code
+    assert post("k1") == 200 and calls == [{"provider": "lse"}]   # unconfigured before
+    assert post("k1") == 200 and len(calls) == 1                  # same key keeps the cache
+    assert post("k2") == 200 and len(calls) == 2                  # different key clears
+    assert client.delete("/api/config/lse_key").status_code == 200
+    assert len(calls) == 2                                        # sign-out does not clear
+
+
+def test_cache_routes_503_on_store_failure(client, monkeypatch):
+    import sqlite3
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    c = client.app.state.cache
+    monkeypatch.setattr(c.store, "stats", boom)
+    monkeypatch.setattr(c, "clear", boom)
+    r = client.get("/api/cache/stats")
+    assert r.status_code == 503 and "cache store failed" in r.json()["detail"]
+    assert client.delete("/api/cache").status_code == 503
+
+
+def test_cache_clear_returns_dict_as_is(client, monkeypatch):
+    out = {"cleared": 2, "skipped": [["lse", "AAPL", "1m"]]}
+    monkeypatch.setattr(client.app.state.cache, "clear", lambda *a, **k: out)
+    assert client.delete("/api/cache").json() == out
