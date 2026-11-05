@@ -61,6 +61,12 @@ class SqliteStore:
         df[CANDLE_COLUMNS[1:]] = df[CANDLE_COLUMNS[1:]].astype("float64")
         return df
 
+    def count(self, key: Key, a: int, b: int) -> int:
+        """Stored bars with a <= ts < b."""
+        return self._conn().execute(
+            "SELECT COUNT(*) FROM bars WHERE provider=? AND symbol=? AND tf=? "
+            "AND ts>=? AND ts<?", (*key, a, b)).fetchone()[0]
+
     def coverage(self, key: Key, now: int) -> list[tuple[int, int, int | None]]:
         """Active ranges, ascending: empty_until NULL or still in the future."""
         return [tuple(r) for r in self._conn().execute(
@@ -72,14 +78,13 @@ class SqliteStore:
         """One transaction: upsert the page's bars, then add coverage [s, e)
         merged with overlapping or adjacent ranges of the same kind. Expired
         empty ranges of the key are dropped on the way."""
+        rows = [(*key, int(r.ts), float(r.open), float(r.high), float(r.low),
+                 float(r.close), float(r.volume)) for r in df.itertuples(index=False)]
         c = self._conn()
         c.execute("BEGIN IMMEDIATE")
         try:
-            if len(df):
-                c.executemany(
-                    "INSERT OR REPLACE INTO bars VALUES (?,?,?,?,?,?,?,?,?)",
-                    [(*key, int(r.ts), float(r.open), float(r.high), float(r.low),
-                      float(r.close), float(r.volume)) for r in df.itertuples(index=False)])
+            if rows:
+                c.executemany("INSERT OR REPLACE INTO bars VALUES (?,?,?,?,?,?,?,?,?)", rows)
             c.execute("DELETE FROM coverage WHERE provider=? AND symbol=? AND tf=? "
                       "AND empty_until IS NOT NULL AND empty_until<=?", (*key, now))
             same = ("empty_until IS NULL" if empty_until is None else "empty_until=?")

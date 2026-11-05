@@ -128,3 +128,12 @@ def test_snapshot_clear_provider_name_with_like_wildcards(tmp_path):
     st.snapshot_clear("a_b")
     assert st.snapshot_get('["a_b","m"]', now=101) == (False, None)
     assert st.snapshot_get('["aXb","m"]', now=101) == (True, [2])
+
+
+def test_count_is_half_open_and_per_key(tmp_path):
+    st = SqliteStore(tmp_path / "c.sqlite")
+    st.write_page(K, _df([60, 120, 180]), 60, 240, None, now=1000)
+    st.write_page(("p", "OTHER", "1m"), _df([60, 120]), 60, 180, None, now=1000)
+    assert st.count(K, 60, 180) == 2
+    assert st.count(K, 0, 2**62) == 3
+    assert st.count(K, 240, 300) == 0
