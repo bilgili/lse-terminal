@@ -9524,12 +9524,27 @@ function openEcon(view, subId) {
   }
 }
 
+// Design D10: a listing call names the active source only when it serves
+// `cap`; otherwise the engine uses its default source. "" or "&provider=x".
+function capParam(cap) {
+  const p = (state.providers || []).find((x) => x.name === state.provider);
+  return p && (p.capabilities || []).includes(cap)
+    ? `&provider=${encodeURIComponent(p.name)}` : "";
+}
+// The source that answered a listing, for the symbol calls that follow it.
+function srcParam(src) {
+  return src ? `&provider=${encodeURIComponent(src)}` : "";
+}
+
 /* ---------- MARKETS > Options: chain + flow tape ---------- */
 const optState = { view: "chain", und: "", expiry: "", chainRows: [],
                    strikes: "auto", greeks: false, unds: [], logos: {},
                    rowH: 26, wired: false, seq: 0, paintKey: "",
                    flashPrev: null, flowTop: 0,
-                   listRows: [], listShown: 0, filterTimer: null };
+                   listRows: [], listShown: 0, filterTimer: null,
+                   // src: source that answered the rail; undSrc: source of the
+                   // open symbol; tapeSrc: source of the all-underlyings tape.
+                   src: "", undSrc: "", tapeSrc: "", undKey: null };
 
 /* Attribute-context escape: aiEscape covers text nodes only (no quote
    escaping), so a name/ticker carrying a double quote would break out of a
@@ -9545,13 +9560,14 @@ function optAttr(s) {
 function optSavePrefs() {
   try {
     localStorage.setItem("lset-options", JSON.stringify({
-      und: optState.und, strikes: optState.strikes, greeks: optState.greeks }));
+      und: optState.und, src: optState.undSrc, strikes: optState.strikes, greeks: optState.greeks }));
   } catch (e) { /* quota/private mode: prefs just don't stick */ }
 }
 function optLoadPrefs() {
   try {
     const p = JSON.parse(localStorage.getItem("lset-options")) || {};
     if (typeof p.und === "string") optState.und = p.und;
+    if (typeof p.src === "string") optState.undSrc = p.src;
     // strikes: "auto" fits the window, "" shows all, else a fixed count.
     // A stored 30 was the old fixed DEFAULT, not a choice anyone made
     // against an auto option that did not exist yet; it upgrades to auto.
@@ -10505,7 +10521,7 @@ function optInit() {
     const und = optState.und, exp = optState.expiry;
     try {
       const r = await fetch(`/api/options/chain?underlying=${encodeURIComponent(und)}` +
-                            `&expiry=${encodeURIComponent(exp)}`);
+                            `&expiry=${encodeURIComponent(exp)}` + srcParam(optState.undSrc));
       if (!r.ok) return;
       const rows = await r.json();
       if (seq === optState.seq && rows.length &&
@@ -10548,6 +10564,9 @@ function optInit() {
     if (!el) return;
     const fromTape = !!el.closest("#opt-body");
     optState.und = el.getAttribute("data-opt-und") || "";
+    // A tape row belongs to the source that answered the tape; a rail row
+    // to the source that answered the rail.
+    optState.undSrc = fromTape ? optState.tapeSrc : optState.src;
     optState.expiry = "";
     ovClearSel(); // the picked contract belongs to the old board
     optSavePrefs();
@@ -10580,9 +10599,19 @@ function optSetView(view) {
 
 async function optLoadUnderlyings() {
   try {
-    const r = await fetch("/api/options/underlyings");
+    optState.undKey = capParam("options");
+    const r = await fetch("/api/options/underlyings?" + optState.undKey.slice(1));
     if (!r.ok) { optRenderList(); return; } // keyless: rail shows the hint
     optState.unds = await r.json();
+    optState.src = r.headers.get("X-Source") || "";
+    // A symbol listed by another source (stale restore, or a source switch)
+    // is not on this rail: drop it rather than ask the wrong source.
+    if (optState.und && optState.undSrc && optState.undSrc !== optState.src) {
+      optState.und = ""; optState.undSrc = ""; optState.expiry = "";
+      optState.chainRows = [];
+      optSavePrefs();
+      optRefresh(true);
+    }
   } catch (e) { /* rail falls back to its connect hint */ }
   optRenderList(true);
   // Company logos ride in after the list paints (same map the watchlist
@@ -10685,6 +10714,8 @@ function optMarkActive() {
 }
 
 async function optRefresh(quiet) {
+  // The active source changed since the rail loaded: reload the rail.
+  if (optState.undKey !== null && capParam("options") !== optState.undKey) optLoadUnderlyings();
   const body = $("opt-body");
   const chain = optState.view === "chain";
   if (chain && !optState.und) {
@@ -10696,20 +10727,25 @@ async function optRefresh(quiet) {
   }
   if (!quiet) body.innerHTML = '<div class="opt-empty">Loading&hellip;</div>';
   const seq = ++optState.seq;
+  // Symbol calls go back to the source that listed the symbol; the
+  // all-underlyings tape is a listing and names the active source.
+  const src = optState.und ? srcParam(optState.undSrc) : capParam("flow");
   const url = chain
-    ? `/api/options/chain?underlying=${encodeURIComponent(optState.und)}`
+    ? `/api/options/chain?underlying=${encodeURIComponent(optState.und)}` + src
     : `/api/options/flow?underlying=${encodeURIComponent(optState.und)}` +
       `&type=${encodeURIComponent($("opt-type").value)}` +
-      `&min_premium=${$("opt-minprem").value || 0}&limit=300`;
+      `&min_premium=${$("opt-minprem").value || 0}&limit=300` + src;
   let rows;
   try {
     const r = await fetch(url);
     if (!r.ok) {
       let msg = `request failed (HTTP ${r.status})`;
       try { msg = (await r.json()).detail || msg; } catch (e) { /* keep msg */ }
+      if (r.status === 404 && optState.und) msg = "not supported by this source";
       throw new Error(msg);
     }
     rows = await r.json();
+    if (!chain && !optState.und) optState.tapeSrc = r.headers.get("X-Source") || "";
   } catch (e) {
     if (!quiet && seq === optState.seq) {
       // The upstream rejects non-ticker charsets (spaces, punctuation) with
@@ -16221,7 +16257,7 @@ async function rwPaintEcon(body) {
   const d0 = new Date();
   const start = d0.toISOString().slice(0, 10);
   const end = new Date(d0.getTime() + 3 * 86400000).toISOString().slice(0, 10);
-  const r = await fetch(`/api/economic-calendar?start=${start}&end=${end}&order=asc&limit=200`);
+  const r = await fetch(`/api/economic-calendar?start=${start}&end=${end}&order=asc&limit=200` + capParam("calendar"));
   if (r.status === 409) { body.textContent = "add your free LSE key to load the calendar"; return; }
   if (!r.ok) { body.textContent = "calendar unavailable"; return; }
   const rows = await r.json();
@@ -16249,11 +16285,14 @@ async function rwPaintEcon(body) {
 }
 
 async function rwPaintOpts(body) {
-  if (!rw.undList) {
-    const r = await fetch("/api/options/underlyings");
+  if (!rw.undList || capParam("options") !== rw.undKey) {
+    rw.undKey = capParam("options");
+    rw.optExpiry = null; // the old source's expiry means nothing here
+    const r = await fetch("/api/options/underlyings?" + rw.undKey.slice(1));
     if (r.status === 409) { body.textContent = "add your free LSE key to load options"; return; }
     if (!r.ok) { body.textContent = "options unavailable"; return; }
     const l = await r.json();
+    rw.undSrc = r.headers.get("X-Source") || "";
     rw.undList = new Set((Array.isArray(l) ? l : []).map((u) =>
       String(u.symbol || u.underlying || u).toUpperCase()));
   }
@@ -16266,7 +16305,7 @@ async function rwPaintOpts(body) {
   if (!rw.optExpiry) {
     // One full-chain read to learn the nearest expiry; the poll then stays
     // on that expiry's slice, which is a fraction of the size.
-    const r = await fetch(`/api/options/chain?underlying=${encodeURIComponent(sym)}&limit=5000`);
+    const r = await fetch(`/api/options/chain?underlying=${encodeURIComponent(sym)}&limit=5000` + srcParam(rw.undSrc));
     if (!r.ok) { body.textContent = "chain unavailable"; return; }
     const all = await r.json();
     const fut = all.filter((c) => c.dte >= 0);
@@ -16274,7 +16313,7 @@ async function rwPaintOpts(body) {
     rw.optExpiry = fut.reduce((a, b) => (a.dte <= b.dte ? a : b)).expiry;
   }
   const r = await fetch(`/api/options/chain?underlying=${encodeURIComponent(sym)}` +
-                        `&expiry=${encodeURIComponent(rw.optExpiry)}&limit=5000`);
+                        `&expiry=${encodeURIComponent(rw.optExpiry)}&limit=5000` + srcParam(rw.undSrc));
   if (!r.ok) { body.textContent = "chain unavailable"; return; }
   const rows = await r.json();
   if (!rows.length) { rw.optExpiry = null; body.textContent = "no contracts"; return; }
