@@ -1,11 +1,15 @@
 ## ADDED Requirements
 
 ### Requirement: Cache wrapper at registration
-`Registry.register` SHALL wrap a provider in `CachedProvider` when the provider's `cacheable` is `True`, the environment variable `LSE_TERMINAL_CACHE` is not `off`, and the engine is not in hosted mode. The registry SHALL own one `CandleCache` that holds the store and the per-key locks; every wrapper SHALL share it. `CachedProvider` SHALL NOT subclass `Provider`. It SHALL delegate every attribute it does not define to the wrapped provider.
+`Registry.register` SHALL wrap a provider in `CachedProvider` when the provider's `cacheable` is `True`, in every mode. The `CandleCache` store SHALL be a `SqliteStore` only when the engine is local and `LSE_TERMINAL_CACHE` is not `off`; otherwise the store SHALL be `None` and `candles` SHALL pass through. The registry SHALL own one `CandleCache` that holds the store, the snapshot backend and the per-key locks; every wrapper SHALL share it. `CachedProvider` SHALL NOT subclass `Provider`. It SHALL delegate every attribute it does not define to the wrapped provider.
 
 #### Scenario: Cache off
 - **WHEN** `LSE_TERMINAL_CACHE=off` and the registry registers `LseProvider`
-- **THEN** `reg.get("lse")` is the unwrapped provider
+- **THEN** `candles` reaches the unwrapped provider unchanged, no cache file is created, and the seven snapshot methods use an in-memory TTL
+
+#### Scenario: Hosted mode
+- **WHEN** the engine is hosted and the registry registers `LseProvider`
+- **THEN** `candles` reaches the unwrapped provider unchanged, no cache file is created, and the seven snapshot methods use an in-memory TTL
 
 #### Scenario: Wrapper is transparent
 - **WHEN** the registry wraps a provider that overrides only `search` and `candles`
@@ -101,7 +105,7 @@ The wrapper SHALL pass `tick`, any timeframe absent from `TIMEFRAME_SECONDS`, an
 - **THEN** the call reaches the source unchanged
 
 ### Requirement: Per-key lock covers fill, read and clear
-The cache SHALL hold one lock per `(provider, symbol, timeframe)`. The lock SHALL cover the gap computation, every fill page, and the response read. `clear(key)` SHALL take the same lock. A global clear SHALL take every lock in sorted key order. Bars and coverage for one page SHALL write in one transaction, bars first.
+The cache SHALL hold one lock per `(provider, symbol, timeframe)`. The lock SHALL cover the gap computation, every fill page, and the response read. `clear(key)` SHALL take the same lock. A global clear SHALL clear each key under its own lock, in sorted key order. Bars and coverage for one page SHALL write in one transaction, bars first.
 
 #### Scenario: Two threads, one key
 - **WHEN** two threads request the same uncovered window at once
