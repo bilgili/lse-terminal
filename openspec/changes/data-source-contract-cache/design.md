@@ -40,29 +40,37 @@ The key lists come from two sources and nowhere else: a recorded LSE fixture (`t
 
 Discarded: one Protocol class per capability. The override test already exists. Protocols add types the UI never reads back.
 
-### D2. One resolver in the engine, two kinds of capability route
+### D2. One resolver in the engine, explicit source never falls back
 
 ```python
-def _source(cap: str, provider: str | None, scoped: bool) -> Provider
+def _source(cap: str, provider: str | None) -> Provider
 ```
 
-Explicit `provider`: 404 when unknown or when the provider lacks `cap`, 409 when the provider is not configured.
+Explicit `provider`: 404 when unknown or when the provider lacks `cap`, 409 when the provider is not configured. The resolver never replaces an explicit provider with another source.
 
-A route is **global** when its answer carries no symbol argument: `screener`, `logos`, `options_underlyings`, `economic_calendar`, `macro_catalog`, and `options_flow` without an underlying. A global route without `provider` falls back to the first registered provider that has `cap` and is configured, else 409.
+No `provider`: the resolver uses the default source for `cap`. The default source is the first registered provider that has `cap` and is configured. When none exists, the route answers 409.
 
-A route is **symbol-scoped** when its answer is about a symbol: `prices`, `option_chain`, `macro_series`, and `options_flow` with an underlying. A symbol-scoped route requires `provider`; without it the route answers 400. Fallback is not allowed, because it would send one source's symbol to another source, and cross-source mapping is a non-goal.
+A route is **global** when its answer carries no symbol argument: `screener`, `logos`, `options_underlyings`, `economic_calendar`, `macro_catalog`, and `options_flow` without an underlying. A route is **symbol-scoped** when its answer is about a symbol: `prices`, `option_chain`, `macro_series`, and `options_flow` with an underlying. Both kinds use the same resolver.
 
-Registration order is `userdata`, `demo`, `lse`, then plugins sorted by entry-point name. `demo` claims none of the lifted capabilities, so LSE stays the default for global routes while a key is set. Entry-point discovery order differs between environments, so the sort makes the fallback stable.
+A symbol-scoped call without `provider` is safe, because the default source is deterministic. The catalog call and the series call of one page both resolve to the same source while the configured set does not change. The cross-source risk exists only when a caller takes a symbol from source A and then names source B. An explicit provider that lacks `cap` answers 404 and does not call another source.
+
+Amended in PR 2. The first draft answered 400 for a symbol-scoped call without `provider`. The React pages (`frontend/src/pages/EconomicCalendar.tsx`) call `/api/macro/series` without `provider`, and D10 keeps them unchanged. The 400 rule would break the Indicators, Bond yields and Central banks views for LSE-only users. Discarded: change the React pages, because the bundle is a build artifact and PR 2 promises no behaviour change for LSE-only users.
+
+Registration order is `userdata`, `demo`, `lse`, then plugins sorted by entry-point name. `demo` claims none of the lifted capabilities, so LSE stays the default source while a key is set. Entry-point discovery order differs between environments, so the sort makes the default source stable.
 
 `configured()` MUST do no I/O. The resolver calls it on every request for every provider.
 
 The resolver replaces `_lse_for_options`, `_lse_for_macro` and every `reg.get("lse")` except the databank download. The download drives the LSE SDK's bulk `history()` into parquet. It is an LSE product feature, not a data surface. A named `_lse_only()` helper marks that one exception. The quant fit source `lse-options` keeps an explicit `provider="lse"`, so a fit does not change vendor when a key is removed.
 
+**Route snapshot cache in PR 2.** The four route caches (`econ_cache`, `macro_cat_cache`, `macro_series_cache`, `opt_cache`) merge into one bounded TTL helper. The key starts with the provider name, so two sources never share an entry. The TTL values do not change. PR 3 replaces the helper with the wrapper snapshot cache (D8). PR 3 must keep a TTL when the engine is hosted or `LSE_TERMINAL_CACHE=off`, because today both modes have the route caches. Discarded: delete the route caches in PR 2. Between PR 2 and PR 3 every options poll and calendar filter change would then reach the network.
+
 ### D3. Shared timeframe table and bound parser
 
 `TIMEFRAME_SECONDS` moves to `contracts/types.py`. `userdata.py` imports it. `demo.py` uses `{**TIMEFRAME_SECONDS, "tick": 1}`, because the demo walk serves `tick` as a one-second grid and must keep that timeframe. `tick` is absent from the shared table. The cache treats a timeframe outside the table as not cacheable.
 
-`to_epoch(bound)` lives next to the table. It turns an ISO string with offset, a date-only string, an epoch string or an int into epoch seconds UTC. Today only `LseProvider._gate_ts` parses bounds. The wrapper and the harness use the shared parser.
+`to_epoch(bound)` lives next to the table. It turns an ISO string with offset, a date-only string, an epoch string or an int into epoch seconds UTC. `LseProvider._gate_ts`, the wrapper and the harness use the shared parser.
+
+A string of exactly eight ASCII digits with no sign is a basic ISO date (`YYYYMMDD`, UTC midnight), not epoch seconds. An eight-digit epoch is a moment in 1970 to 1973, which no caller means. `_gate_ts` already reads `"20240630"` as a date on Python 3.11 and later. The shared rule uses `strptime`, so the answer does not depend on the Python version. Decided in PR 2 (task 2.14).
 
 ### D4. Plugins are custom sources
 
@@ -137,7 +145,7 @@ Each migrated route becomes: resolve the source, call the method, map `NotSuppor
 
 ### D10. UI
 
-Global routes: one helper `capParam(cap)` in `app.js` returns `provider=<active>` when the active source has `cap`, else an empty string. Symbol-scoped routes: `app.js` always sends `provider=<active>`, and renders a 404 as "not supported by this source". The chain-or-flow URL builder sends the active source for the chain and for the tape with an underlying, and `capParam("flow")` for the tape without one. The React pages and the backtest dialog stay unchanged.
+One helper `capParam(cap)` in `app.js` returns `provider=<active>` when the active source has `cap`, else an empty string. Without the parameter, the engine uses the default source (D2). A page sends the same parameter for its listing call and for its symbol calls, so a symbol always goes back to the source that listed it. The options page and the trade dock use `capParam("options")` for the underlyings, the chain and the tape with an underlying. The tape without an underlying uses `capParam("flow")`. A 404 renders as "not supported by this source". Call sites that name `provider=lse` today keep it. The React pages and the backtest dialog stay unchanged.
 
 ### D11. moomoo plugin
 

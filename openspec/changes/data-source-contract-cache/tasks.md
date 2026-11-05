@@ -11,20 +11,20 @@
 
 ## 2. Server routes and UI (PR 2, no behaviour change for LSE-only users)
 
-- [ ] 2.1 Add `_source(cap, provider, scoped)` and `_lse_only()` to `server.py`.
+- [ ] 2.1 Add `_source(cap, provider)` and `_lse_only()` to `server.py`.
 - [ ] 2.2 Migrate the global routes `/api/screener`, `/api/logos`, `/api/options/underlyings`, `/api/economic-calendar`, `/api/macro/catalog`, and `/api/options/flow` without underlying. Add the optional `provider` parameter.
-- [ ] 2.3 Migrate the symbol-scoped routes `/api/prices`, `/api/options/chain`, `/api/macro/series`, and `/api/options/flow` with underlying. `provider` required, 400 without it.
-- [ ] 2.4 Delete `econ_cache`, `macro_cat_cache`, `macro_series_cache`, `opt_cache`, `_opt_cached`, `_lse_for_options`, `_lse_for_macro`.
+- [ ] 2.3 Migrate the symbol-scoped routes `/api/prices`, `/api/options/chain`, `/api/macro/series`, and `/api/options/flow` with underlying. Optional `provider`; without it, the default source (D2). An explicit provider never falls back.
+- [ ] 2.4 Merge `econ_cache`, `macro_cat_cache`, `macro_series_cache` and `opt_cache` into one bounded TTL helper whose key starts with the provider name. Keep the TTL values. Delete `_opt_cached`, `_lse_for_options`, `_lse_for_macro`.
 - [ ] 2.5 Migrate the assistant tool defaults, `_ml_econ_frame`, the quant fit-info flag, and the quant fit `lse-options` source with explicit `provider="lse"`.
 - [ ] 2.6 Keep the databank download on `_lse_only()`.
-- [ ] 2.7 `app.js`: add `capParam(cap)` for global routes. Symbol-scoped call sites always send the active source and render 404 as "not supported by this source". Apply at the nine call sites and the two probes.
-- [ ] 2.8 Tests: `FullStubProvider` in `tests/`. One route test per migrated endpoint: explicit provider, global fallback, 400 on a scoped route without provider, 404 on missing capability, 409 on unconfigured, no cross-source call on a scoped 404. `/api/providers` shows the stub as custom with the full capability list. Grep gate for `reg.get("lse")`. Plugin sort order.
+- [ ] 2.7 `app.js`: add `capParam(cap)`. The options page and the trade dock use `capParam("options")` for underlyings, chain and the tape with an underlying; the tape without one uses `capParam("flow")`; the calendar uses `capParam("calendar")`. Render 404 as "not supported by this source". Apply at the call sites without `provider` and the two probes. Call sites with `provider=lse` keep it.
+- [ ] 2.8 Tests: `FullStubProvider` in `tests/`. One route test per migrated endpoint: explicit provider, default source without provider, 404 on missing capability, 409 on unconfigured, no cross-source call on a scoped 404. `/api/providers` shows the stub as custom with the full capability list. Grep gate for `reg.get("lse")`. Plugin sort order.
 - [ ] 2.9 `LseProvider._gate_ts` calls `to_epoch` and only formats the result. Today it parses bounds with its own rules, so `"20240630"` is a date there and epoch seconds in `to_epoch`.
 - [ ] 2.10 `engine/quant_fit.py` uses `TIMEFRAME_SECONDS` instead of its own timeframe table, which lacks `30s`.
 - [ ] 2.11 `server.py` reads `is_custom`, `is_broker` and `logos` as attributes, not through `getattr(..., default)`. The base class defines all three since PR 1.
 - [ ] 2.12 `Registry.register` records a `plugin_errors` entry when a plugin replaces an existing provider name, so a silent override of `lse` or `userdata` is visible. `load_plugins` also states in a `plugin_errors` entry when it cannot set `is_custom` on a plugin (`__slots__` or a read-only property), so the load failure names its cause.
-- [ ] 2.13 `BrokerProvider.candles` returns the oldest N bars for a start-anchored call. Today it always asks the adapter for the newest `count` bars.
-- [ ] 2.14 Decide whether `to_epoch` rejects an 8-digit digit string (`"20240630"`), which it reads as epoch seconds in 1970. Record the decision in design D3.
+- [ ] 2.13 Deferred: `BrokerProvider.candles` returns the oldest N bars for a start-anchored call. The adapter protocol `bars.history` takes only `count`, so the fix needs an anchor field in the adapter protocol first. The `ponytail:` comment stays.
+- [ ] 2.14 `to_epoch` reads exactly eight unsigned ASCII digits as `YYYYMMDD` UTC (design D3). Test it.
 
 ## 3. Cache (PR 3, behind `LSE_TERMINAL_CACHE`)
 
@@ -36,6 +36,7 @@
 - [ ] 3.6 Tests `tests/test_cache.py`, fake source with a clock and a call counter. The ten listed cases: repeat window, no partial bar, gap fill, holiday coverage, truncation, limit-only, same-key lock, cross-key no wait, clear, bypass and off switch. Plus one test per model counter-example: `cx_tail`, `cx_edge`, `cx_trunc`, `cx_count`, `cx_lock`, `cx_irr`, `cx_transient`, `cx_skip`, `cx_lag`, `cx_restate`. Plus wrapper transparency, lock survives re-registration, sign-out pass-through, end-only bypass, empty coverage heals, snapshot canonical key and provider override.
 - [ ] 3.7 README: one paragraph on the cache file, the switch, and `lset cache clear`.
 - [ ] 3.8 Review gate: run `tlc design.tla -config design.cfg` and every `design.cx_*.cfg` whenever D7 changes; the `cx_*` runs must still fail.
+- [ ] 3.9 Delete the PR 2 route snapshot helper when the wrapper snapshot cache lands. Keep a TTL for the seven snapshot methods when the engine is hosted or `LSE_TERMINAL_CACHE=off`.
 
 ## 4. moomoo plugin (separate repository `lse-terminal-moomoo`)
 
