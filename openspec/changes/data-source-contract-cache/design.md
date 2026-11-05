@@ -118,7 +118,7 @@ The `coverage` table has no primary key. A real range and an empty range can sha
 
 SQLite threading: one connection per thread (`threading.local`), `busy_timeout` 5 s, `PRAGMA journal_mode=WAL`. A write transaction never spans a source call. Each page of a fill is one transaction after the source answers, bars first, then coverage.
 
-Snapshot bodies pass through FastAPI's `jsonable_encoder` before storage, so rows with `datetime` or `NaN` round-trip. Every `snapshot_put` deletes rows whose `expires` has passed, so the table stays bounded like the dicts it replaces.
+The wrapper encodes each snapshot body once, with FastAPI's `jsonable_encoder` and `json.dumps`, before it calls `snapshot_put`. Both backends store that text and return a fresh decoded copy, so a miss and a hit give equal objects and no caller shares a cached object. Rows with `datetime` or `NaN` round-trip. Every `snapshot_put` deletes rows whose `expires` has passed, so the table stays bounded like the dicts it replaces.
 
 ### D7. Candle fill rules
 
