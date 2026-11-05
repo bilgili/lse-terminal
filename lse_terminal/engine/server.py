@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from lse_terminal import __version__
 from lse_terminal.contracts import NotSupported, all_specs, compute
+from lse_terminal.contracts.provider import UNSUPPORTED
 from lse_terminal.engine import config as cfg
 from lse_terminal.engine.registry import Registry, load_builtins, load_plugins
 from lse_terminal.engine.user_indicators import TEMPLATE, UserIndicators
@@ -701,43 +702,28 @@ def create_app() -> FastAPI:
         ]
 
     # ── Source resolution (design D2) ─────────────────────────────────
-    # Capability -> the 409 text the UI shows for an unconfigured LSE.
-    # Word for word from the pre-resolver routes; app.js shows `detail`.
-    _LSE_KEY_HINT = {
-        "calendar": "LSE API key not set. Add your free key to load the economic calendar.",
-        "macro": "LSE API key not set. Add your free key to load macro data.",
-        "options": "LSE API key not set. Add your free key under MARKETS to load options data.",
-        "flow": "LSE API key not set. Add your free key under MARKETS to load options data.",
-        # The screener route mapped LseProvider._lse()'s RuntimeError to 409.
-        "screener": ("LSE provider needs an API key. Get a free one at "
-                     "https://londonstrategicedge.com/data#api and set it in the terminal."),
-    }
-    # Capability -> the 404 wording for an explicit provider without it, the
-    # same words the contract's NotSupported defaults use.
-    _LACKS = {"prices": "has no price board", "screener": "has no screener feed",
-              "logos": "has no logos", "options": "has no options",
-              "flow": "has no options flow", "calendar": "has no economic calendar",
-              "macro": "has no macro data"}
-
-    def _source(cap: str, provider: str | None = None, *, need_key: bool = True):
+    def _source(cap: str, provider: str | None = None, *, response: Response | None = None,
+                need_key: bool = True):
         """The provider that serves `cap` (design D2). Explicit provider:
         that one or 404/409, never another source. None: the first
         registered provider that has `cap`, configured or not, so the
-        default never moves when a key is saved or cleared (LSE today)."""
+        default never moves when a key is saved or cleared (LSE today).
+        Sets X-Source on `response` once every check has passed."""
         if provider:
             try:
                 p = reg.get(provider)
             except ValueError as e:
                 raise HTTPException(404, str(e))
             if cap not in p.capabilities():
-                raise HTTPException(404, f"{provider} {_LACKS.get(cap, f'does not support {cap}')}")
+                raise HTTPException(404, f"{provider} {UNSUPPORTED.get(cap, f'does not support {cap}')}")
         else:
             p = next((q for q in reg.all() if cap in q.capabilities()), None)
             if p is None:
                 raise HTTPException(404, f"no source supports {cap}")
         if need_key and not p.configured():
-            raise HTTPException(409, (_LSE_KEY_HINT.get(cap) if p.name == "lse" else None)
-                                or f"{p.name} is not configured")
+            raise HTTPException(409, p.setup_hint(cap))
+        if response is not None:
+            response.headers["X-Source"] = p.name
         return p
 
     def _lse_only():
@@ -748,7 +734,7 @@ def create_app() -> FastAPI:
         except ValueError:
             raise HTTPException(404, "LSE provider not available")
         if not p.configured():
-            raise HTTPException(409, _LSE_KEY_HINT["options"])
+            raise HTTPException(409, p.setup_hint("options"))
         return p
 
     # One TTL cache for the snapshot routes until the wrapper snapshot
@@ -768,7 +754,9 @@ def create_app() -> FastAPI:
             return hit[1]
         rows = _call(fetch, what)
         if len(c) >= _SNAP_BOUND[tag]:
-            del c[min(c, key=lambda x: c[x][0])]
+            # Threadpool routes: list() is atomic under the GIL, pop tolerates a racing evict.
+            old = min(list(c.items()), key=lambda kv: kv[1][0])[0]
+            c.pop(old, None)
         c[k] = (time.time(), rows)
         return rows
 
@@ -785,8 +773,7 @@ def create_app() -> FastAPI:
         """Latest price/bid/ask for up to 50 symbols from the platform price
         board (/v1/prices). The watchlist polls this once a second instead of
         holding websocket subscriptions per row (plan cap: 16 concurrent)."""
-        p = _source("prices", provider)
-        response.headers["X-Source"] = p.name
+        p = _source("prices", provider, response=response)
         syms = [s for s in symbols.split(",") if s.strip()][:50]
         if not syms:
             return []
@@ -798,8 +785,7 @@ def create_app() -> FastAPI:
         provider's screener(). Optional capability like logos(): providers
         without one 404 and the UI shows its connect/unsupported hint. The
         provider caches with ETag so the UI can poll this freely."""
-        p = _source("screener", provider)
-        response.headers["X-Source"] = p.name
+        p = _source("screener", provider, response=response)
         return _call(p.screener, "screener")
 
     @app.get("/api/logos")
@@ -809,8 +795,7 @@ def create_app() -> FastAPI:
         just get an empty map, which the UI renders as monogram tiles. The
         logo map is public, so the source needs no key."""
         try:
-            p = _source("logos", provider, need_key=False)
-            response.headers["X-Source"] = p.name
+            p = _source("logos", provider, response=response, need_key=False)
             return p.logos()
         except Exception:
             # Logos are decoration; a fetch hiccup must never error the UI.
@@ -1139,8 +1124,7 @@ def create_app() -> FastAPI:
                           start: str | None = None, end: str | None = None,
                           released: int = 0, order: str = "asc",
                           limit: int = 5000, provider: str | None = None):
-        p = _source("calendar", provider)
-        response.headers["X-Source"] = p.name
+        p = _source("calendar", provider, response=response)
         lim = min(int(limit), 5000)
         regions = [r.strip() for r in region.split(",") if r.strip()]
         return _snap(p, "econ", (region, event, start, end, bool(released), order, lim), 60,
@@ -1157,8 +1141,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/macro/catalog")
     def macro_catalog(response: Response, provider: str | None = None):
-        p = _source("macro", provider)
-        response.headers["X-Source"] = p.name
+        p = _source("macro", provider, response=response)
         # 60s, not an hour: a dataset added on the fleet shows on next open.
         return _snap(p, "macro_cat", (), 60, p.macro_catalog, "macro catalog")
 
@@ -1167,8 +1150,7 @@ def create_app() -> FastAPI:
                      start: str | None = None, end: str | None = None,
                      order: str = "asc", limit: int = 5000,
                      provider: str | None = None):
-        p = _source("macro", provider)
-        response.headers["X-Source"] = p.name
+        p = _source("macro", provider, response=response)
         lim = min(int(limit), 5000)
         # 10 min: macro series print daily at best (most are monthly), and the
         # yield-curve view re-requests the same tenors every time a country is
@@ -1185,8 +1167,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/options/underlyings")
     def options_underlyings(response: Response, provider: str | None = None):
-        p = _source("options", provider)
-        response.headers["X-Source"] = p.name
+        p = _source("options", provider, response=response)
         # 60s, not an hour: a newly optionable symbol shows on next open.
         return _snap(p, "opt", ("und",), 60, p.options_underlyings, "options request")
 
@@ -1194,8 +1175,7 @@ def create_app() -> FastAPI:
     def options_chain(response: Response, underlying: str, type: str = "",
                       expiry: str = "", limit: int = 5000,
                       provider: str | None = None):
-        p = _source("options", provider)
-        response.headers["X-Source"] = p.name
+        p = _source("options", provider, response=response)
         lim = min(int(limit), 5000)
         # 15s, matching the flow tape: the vault refreshes the chain every
         # minute, but a 30s cache on top of the client's 30s poll made the
@@ -1209,8 +1189,7 @@ def create_app() -> FastAPI:
     def options_flow(response: Response, underlying: str = "", type: str = "",
                      min_premium: float = 0, limit: int = 300,
                      provider: str | None = None):
-        p = _source("flow", provider)
-        response.headers["X-Source"] = p.name
+        p = _source("flow", provider, response=response)
         lim = min(int(limit), 1000)
         return _snap(p, "opt", ("flow", underlying.strip().upper(), type, float(min_premium), lim),
                      15, lambda: p.options_flow(underlying=underlying.strip() or None,

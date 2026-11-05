@@ -24,6 +24,19 @@ class NotSupported(Exception):
     """Raised by optional provider methods the source cannot serve."""
 
 
+# Capability -> the words after the provider name in the NotSupported
+# message of its default method. The engine reuses them for its 404.
+UNSUPPORTED: Mapping[str, str] = MappingProxyType({
+    "prices": "has no price board",
+    "screener": "has no screener feed",
+    "logos": "has no logos",
+    "options": "has no options",
+    "flow": "has no options flow",
+    "calendar": "has no economic calendar",
+    "macro": "has no macro data",
+})
+
+
 class Provider(ABC):
     # Machine identifier, unique across installed providers (used in URLs).
     name: str = ""
@@ -99,46 +112,53 @@ class Provider(ABC):
 
     def prices(self, symbols: list[str]) -> list[dict]:
         """Latest price per symbol. Rows: ``PriceRow``."""
-        raise NotSupported(f"{self.name} has no price board")
+        raise NotSupported(f"{self.name} {UNSUPPORTED['prices']}")
 
     def screener(self) -> dict:
         """Cross-sectional snapshot ``{"columns": [...], "data": [...]}`` (plus ``as_of``, ``count``)."""
-        raise NotSupported(f"{self.name} has no screener feed")
+        raise NotSupported(f"{self.name} {UNSUPPORTED['screener']}")
 
     def logos(self) -> dict:
         """Symbol -> ``{"light": url, "dark": url}``."""
-        raise NotSupported(f"{self.name} has no logos")
+        raise NotSupported(f"{self.name} {UNSUPPORTED['logos']}")
 
     def options_underlyings(self) -> list[dict]:
         """Optionable underlyings. Rows: ``UnderlyingRow``."""
-        raise NotSupported(f"{self.name} has no options")
+        raise NotSupported(f"{self.name} {UNSUPPORTED['options']}")
 
     def option_chain(self, underlying: str, type: str | None = None,
                      expiry: str | None = None, limit: int = 5000) -> list[dict]:
         """Current chain for one underlying. Rows: ``ChainRow``."""
-        raise NotSupported(f"{self.name} has no options")
+        raise NotSupported(f"{self.name} {UNSUPPORTED['options']}")
 
     def options_flow(self, underlying: str | None = None, type: str | None = None,
                      min_premium: float | None = None, limit: int = 300) -> list[dict]:
         """Recent option prints, newest first. Rows: ``FlowRow``."""
-        raise NotSupported(f"{self.name} has no options flow")
+        raise NotSupported(f"{self.name} {UNSUPPORTED['flow']}")
 
     def economic_calendar(self, region=None, event: str | None = None,
                           start: str | None = None, end: str | None = None,
                           released_only: bool = False, order: str = "asc",
                           limit: int = 5000) -> list[dict]:
         """Macro release events. Rows: ``CalendarRow``."""
-        raise NotSupported(f"{self.name} has no economic calendar")
+        raise NotSupported(f"{self.name} {UNSUPPORTED['calendar']}")
 
     def macro_catalog(self) -> list[dict]:
         """Every macro series the source holds. Rows: ``MacroCatalogRow``."""
-        raise NotSupported(f"{self.name} has no macro data")
+        raise NotSupported(f"{self.name} {UNSUPPORTED['macro']}")
 
     def macro_series(self, symbol: str, dataset: str | None = None,
                      start: str | None = None, end: str | None = None,
                      order: str = "asc", limit: int = 5000) -> list[dict]:
         """One macro series. Rows: ``MacroSeriesRow``."""
-        raise NotSupported(f"{self.name} has no macro data")
+        raise NotSupported(f"{self.name} {UNSUPPORTED['macro']}")
+
+    def setup_hint(self, cap: str) -> str:
+        """The text the UI shows when ``cap`` answers 409 (source not configured).
+
+        Must do no I/O. Override to give a per-capability instruction.
+        """
+        return f"{self.name} is not configured"
 
     def configured(self) -> bool:
         """False when the source needs setup (an API key, a path) it doesn't have.

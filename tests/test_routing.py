@@ -281,3 +281,61 @@ def test_grep_gate_reg_get_lse_only_in_lse_only():
 
     visit(tree, None)
     assert bad == []
+
+
+def test_x_source_present_on_cache_hit(client, stub):
+    for _ in range(2):
+        r = client.get("/api/options/chain", params={"underlying": "X", "provider": "stub"})
+        assert r.status_code == 200 and r.headers["X-Source"] == "stub"
+    assert stub.calls == {"option_chain": 1}
+
+
+def test_error_answers_carry_no_x_source(client, stub):
+    stub.on = False
+    r = client.get("/api/macro/catalog", params={"provider": "stub"})
+    assert r.status_code == 409 and "X-Source" not in r.headers
+
+
+@pytest.fixture()
+def clock(monkeypatch):
+    """The `time` module server.py sees, with a settable time()."""
+    import time as _time
+
+    from lse_terminal.engine import server
+    now = [1000.0]
+    fake = SimpleNamespace(**{**vars(_time), "time": lambda: now[0]})
+    monkeypatch.setattr(server, "time", fake)
+    return now
+
+
+@pytest.mark.parametrize("path,params,method,ttl", [
+    ("/api/options/chain", {"underlying": "X"}, "option_chain", 15),
+    ("/api/macro/series", {"symbol": "US.CPI"}, "macro_series", 600),
+])
+def test_snapshot_ttl_expiry(client, stub, clock, path, params, method, ttl):
+    q = {**params, "provider": "stub"}
+    client.get(path, params=q)
+    clock[0] += ttl - 1
+    client.get(path, params=q)
+    assert stub.calls == {method: 1}
+    clock[0] += 2
+    client.get(path, params=q)
+    assert stub.calls == {method: 2}
+
+
+def test_flow_without_underlying_reaches_stub(client, stub):
+    r = client.get("/api/options/flow", params={"provider": "stub"})
+    assert r.status_code == 200 and r.json() == [FIX["options_flow"]]
+    assert stub.calls == {"options_flow": 1}
+
+
+def test_flow_without_underlying_default_source(client, lse):
+    lse.on = True
+    r = client.get("/api/options/flow")
+    assert r.status_code == 200 and r.headers["X-Source"] == "lse"
+    assert lse.calls == ["options_flow"]
+
+
+def test_databank_unconfigured_is_409_with_options_hint(client):
+    r = client.get("/api/lse/databank")
+    assert (r.status_code, r.json()["detail"]) == (409, OPT)

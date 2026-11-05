@@ -11,6 +11,7 @@ from lse_terminal.contracts import (
     Provider,
     to_epoch,
 )
+from lse_terminal.contracts.provider import UNSUPPORTED
 from lse_terminal.providers import DemoProvider, LseProvider, UserDataProvider
 
 FIXTURE = json.loads(
@@ -443,3 +444,27 @@ def test_tf_label_thirty_seconds():
 def test_to_epoch_rejects_eight_digits_that_are_not_a_date(s):
     with pytest.raises(ValueError, match="unparseable bound"):
         to_epoch(s)
+
+
+def test_setup_hint_default_names_the_provider():
+    assert Bare().setup_hint("options") == "bare is not configured"
+
+
+@pytest.mark.parametrize("method", LIFTED)
+def test_default_not_supported_text_comes_from_unsupported(method):
+    cap = next(c for c, ms in Provider._CAPABILITY_METHODS.items() if method in ms)
+    with pytest.raises(NotSupported) as e:
+        getattr(Bare(), method)(*_ARGS.get(method, ()))
+    assert str(e.value) == f"bare {UNSUPPORTED[cap]}"
+
+
+def test_lse_setup_hints_keep_their_words():
+    p = LseProvider(api_key="")
+    assert p.setup_hint("calendar") == "LSE API key not set. Add your free key to load the economic calendar."
+    assert p.setup_hint("macro") == "LSE API key not set. Add your free key to load macro data."
+    for cap in ("options", "flow"):
+        assert p.setup_hint(cap) == "LSE API key not set. Add your free key under MARKETS to load options data."
+    assert p.setup_hint("screener") == ("LSE provider needs an API key. Get a free one at "
+                                        "https://londonstrategicedge.com/data#api and set it in the terminal.")
+    assert p.setup_hint("prices") == "lse is not configured"
+    assert p.setup_hint("logos") == "lse is not configured"

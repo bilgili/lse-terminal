@@ -19,6 +19,20 @@ from lse_terminal.contracts import CANDLE_COLUMNS, Instrument, Provider, to_epoc
 from lse_terminal.engine.config import get_lse_api_key
 from lse_terminal.providers.spread import QuoteSynthesizer
 
+# One text for "no key": the RuntimeError of the key-gated calls and the
+# 409 text the engine shows for the screener.
+_NEEDS_KEY = ("LSE provider needs an API key. Get a free one at "
+              "https://londonstrategicedge.com/data#api and set it in the terminal.")
+
+# Capability -> the 409 text the UI shows while the key is unset.
+_SETUP_HINT = {
+    "calendar": "LSE API key not set. Add your free key to load the economic calendar.",
+    "macro": "LSE API key not set. Add your free key to load macro data.",
+    "options": "LSE API key not set. Add your free key under MARKETS to load options data.",
+    "flow": "LSE API key not set. Add your free key under MARKETS to load options data.",
+    "screener": _NEEDS_KEY,
+}
+
 # Catalog datasets the /candles endpoint serves. Options and economics exist
 # in the catalog but chart through different endpoints; they join in v0.2+.
 _CANDLE_DATASETS = {
@@ -102,12 +116,12 @@ class LseProvider(Provider):
     def configured(self) -> bool:
         return bool(self._key)
 
+    def setup_hint(self, cap: str) -> str:
+        return _SETUP_HINT.get(cap) or super().setup_hint(cap)
+
     def _lse(self):
         if not self._key:
-            raise RuntimeError(
-                "LSE provider needs an API key. Get a free one at "
-                "https://londonstrategicedge.com/data#api and set it in the terminal."
-            )
+            raise RuntimeError(_NEEDS_KEY)
         with self._lock:
             if self._client is None:
                 from lse import LSE
@@ -429,9 +443,7 @@ class LseProvider(Provider):
         if not self._key:
             # Same contract as _lse(): the engine route maps this to a 409
             # and the page renders the connect hint instead of an error.
-            raise RuntimeError(
-                "LSE provider needs an API key. Get a free one at "
-                "https://londonstrategicedge.com/data#api and set it in the terminal.")
+            raise RuntimeError(_NEEDS_KEY)
         import gzip as _gzip
         import json as _json
         import urllib.error
