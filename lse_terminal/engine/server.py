@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 
 import pandas as pd
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import (FastAPI, File, Form, HTTPException, Request, Response, UploadFile,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -627,8 +628,7 @@ def create_app() -> FastAPI:
             # A connected broker is the user's own connection, not something
             # the fleet directory lists as a data vendor, so it is never
             # filtered by the allowlist.
-            own = (bool(getattr(p, "is_custom", False)) or p.name == "userdata"
-                   or bool(getattr(p, "is_broker", False)))
+            own = p.is_custom or p.name == "userdata" or p.is_broker
             if allowed is not None and not own and p.name not in allowed:
                 continue
             out.append(
@@ -636,10 +636,10 @@ def create_app() -> FastAPI:
                  "capabilities": sorted(p.capabilities()), "configured": p.configured(),
                  # Custom = user-configured live source; the MARKETS sidebar
                  # shows these as their own folders next to LSE.
-                 "custom": bool(getattr(p, "is_custom", False)),
+                 "custom": bool(p.is_custom),
                  # A live execution venue driving the markets page. The UI
                  # treats it as a live source but keeps research off it.
-                 "broker": bool(getattr(p, "is_broker", False))})
+                 "broker": bool(p.is_broker)})
         return out
 
     @app.get("/api/directory")
@@ -700,62 +700,118 @@ def create_app() -> FastAPI:
             for s in all_specs()
         ]
 
-    @app.get("/api/prices")
-    def prices(provider: str, symbols: str):
-        """Latest price/bid/ask for up to 50 symbols from the platform price
-        board (/v1/prices). The watchlist polls this once a second instead of
-        holding websocket subscriptions per row (plan cap: 16 concurrent)."""
+    # ── Source resolution (design D2) ─────────────────────────────────
+    # Capability -> the 409 text the UI shows for an unconfigured LSE.
+    # Word for word from the pre-resolver routes; app.js shows `detail`.
+    _LSE_KEY_HINT = {
+        "calendar": "LSE API key not set. Add your free key to load the economic calendar.",
+        "macro": "LSE API key not set. Add your free key to load macro data.",
+        "options": "LSE API key not set. Add your free key under MARKETS to load options data.",
+        "flow": "LSE API key not set. Add your free key under MARKETS to load options data.",
+        # The screener route mapped LseProvider._lse()'s RuntimeError to 409.
+        "screener": ("LSE provider needs an API key. Get a free one at "
+                     "https://londonstrategicedge.com/data#api and set it in the terminal."),
+    }
+    # Capability -> the 404 wording for an explicit provider without it, the
+    # same words the contract's NotSupported defaults use.
+    _LACKS = {"prices": "has no price board", "screener": "has no screener feed",
+              "logos": "has no logos", "options": "has no options",
+              "flow": "has no options flow", "calendar": "has no economic calendar",
+              "macro": "has no macro data"}
+
+    def _source(cap: str, provider: str | None = None, *, need_key: bool = True):
+        """The provider that serves `cap` (design D2). Explicit provider:
+        that one or 404/409, never another source. None: the first
+        registered provider that has `cap`, configured or not, so the
+        default never moves when a key is saved or cleared (LSE today)."""
+        if provider:
+            try:
+                p = reg.get(provider)
+            except ValueError as e:
+                raise HTTPException(404, str(e))
+            if cap not in p.capabilities():
+                raise HTTPException(404, f"{provider} {_LACKS.get(cap, f'does not support {cap}')}")
+        else:
+            p = next((q for q in reg.all() if cap in q.capabilities()), None)
+            if p is None:
+                raise HTTPException(404, f"no source supports {cap}")
+        if need_key and not p.configured():
+            raise HTTPException(409, (_LSE_KEY_HINT.get(cap) if p.name == "lse" else None)
+                                or f"{p.name} is not configured")
+        return p
+
+    def _lse_only():
+        """The databank download is an LSE product feature, not a data
+        surface (design D2), so it alone names the provider."""
         try:
-            p = reg.get(provider)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        if "prices" not in p.capabilities():
-            raise HTTPException(404, f"{provider} has no price board")
-        syms = [s for s in symbols.split(",") if s.strip()][:50]
-        if not syms:
-            return []
+            p = reg.get("lse")
+        except ValueError:
+            raise HTTPException(404, "LSE provider not available")
+        if not p.configured():
+            raise HTTPException(409, _LSE_KEY_HINT["options"])
+        return p
+
+    # One TTL cache for the snapshot routes until the wrapper snapshot
+    # cache lands (PR 3, task 3.9). Key = resolved provider, route tag,
+    # canonical args; the caller resolves (and checks the key) first, so
+    # a signed-out source never serves a cached row. Bounds per tag, as
+    # the four caches this replaces had (the catalog had one key; now one
+    # per source).
+    _SNAP_BOUND = {"econ": 64, "macro_cat": 8, "macro_series": 256, "opt": 64}
+    snap_cache: dict[str, dict[tuple, tuple[float, object]]] = {k: {} for k in _SNAP_BOUND}
+
+    def _snap(p, tag: str, args: tuple, ttl: float, fetch, what: str):
+        c = snap_cache[tag]
+        k = (p.name, *args)
+        hit = c.get(k)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        rows = _call(fetch, what)
+        if len(c) >= _SNAP_BOUND[tag]:
+            del c[min(c, key=lambda x: c[x][0])]
+        c[k] = (time.time(), rows)
+        return rows
+
+    def _call(fetch, what: str):
         try:
-            return p.prices(syms)
+            return fetch()
         except NotSupported as e:
             raise HTTPException(404, str(e))
         except Exception as e:
-            raise HTTPException(502, f"prices failed: {e}")
+            raise HTTPException(502, f"{what} failed: {e}")
+
+    @app.get("/api/prices")
+    def prices(response: Response, symbols: str, provider: str | None = None):
+        """Latest price/bid/ask for up to 50 symbols from the platform price
+        board (/v1/prices). The watchlist polls this once a second instead of
+        holding websocket subscriptions per row (plan cap: 16 concurrent)."""
+        p = _source("prices", provider)
+        response.headers["X-Source"] = p.name
+        syms = [s for s in symbols.split(",") if s.strip()][:50]
+        if not syms:
+            return []
+        return _call(lambda: p.prices(syms), "prices")
 
     @app.get("/api/screener")
-    def screener(provider: str = "lse"):
+    def screener(response: Response, provider: str | None = None):
         """The full screener snapshot (rows + column manifest) from the
         provider's screener(). Optional capability like logos(): providers
         without one 404 and the UI shows its connect/unsupported hint. The
         provider caches with ETag so the UI can poll this freely."""
-        try:
-            p = reg.get(provider)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        try:
-            return p.screener()
-        except NotSupported as e:
-            raise HTTPException(404, str(e))
-        except RuntimeError as e:
-            # Unconfigured key: same 409 contract as the options routes so
-            # the page renders the connect hint instead of an error.
-            raise HTTPException(409, str(e))
-        except Exception as e:
-            raise HTTPException(502, f"screener failed: {e}")
+        p = _source("screener", provider)
+        response.headers["X-Source"] = p.name
+        return _call(p.screener, "screener")
 
     @app.get("/api/logos")
-    def logos(provider: str):
+    def logos(response: Response, provider: str | None = None):
         """Symbol -> {light, dark} logo URL map for the watchlist. Optional
         capability: providers without a logos() (user data, custom vendors)
-        just get an empty map, which the UI renders as monogram tiles."""
+        just get an empty map, which the UI renders as monogram tiles. The
+        logo map is public, so the source needs no key."""
         try:
-            p = reg.get(provider)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        fn = getattr(p, "logos", None)
-        if fn is None:
-            return {}
-        try:
-            return fn()
+            p = _source("logos", provider, need_key=False)
+            response.headers["X-Source"] = p.name
+            return p.logos()
         except Exception:
             # Logos are decoration; a fetch hiccup must never error the UI.
             return {}
@@ -1076,164 +1132,91 @@ def create_app() -> FastAPI:
     # ── Economic calendar: LSE macro-event feed ───────────────────────
 
     # Filter flips in the calendar UI re-request the same windows over and
-    # over; a short TTL cache keeps that snappy and spares the remote API.
-    # Bounded so an event-history browse (one entry per event) can't grow it
-    # without limit.
-    econ_cache: dict[tuple, tuple[float, list]] = {}
-
+    # over; a short TTL cache (_snap, tag "econ", 60s) keeps that snappy and
+    # spares the remote API. 409 = "connect a key", rendered as a hint.
     @app.get("/api/economic-calendar")
-    def economic_calendar(region: str = "", event: str = "",
+    def economic_calendar(response: Response, region: str = "", event: str = "",
                           start: str | None = None, end: str | None = None,
                           released: int = 0, order: str = "asc",
-                          limit: int = 5000):
-        try:
-            p = reg.get("lse")
-        except ValueError:
-            raise HTTPException(404, "LSE provider not available")
-        if not p.configured():
-            # 409 (not 502): the terminal works, the user just hasn't linked
-            # a key. The calendar page shows its "connect a key" state on this.
-            raise HTTPException(409, "LSE API key not set. Add your free key "
-                                     "to load the economic calendar.")
-        key = (region, event, start, end, bool(released), order,
-               min(int(limit), 5000))
-        hit = econ_cache.get(key)
-        if hit and time.time() - hit[0] < 60:
-            return hit[1]
-        try:
-            regions = [r.strip() for r in region.split(",") if r.strip()]
-            rows = p.economic_calendar(region=regions or None,
-                                       event=event or None, start=start,
-                                       end=end, released_only=bool(released),
-                                       order=order, limit=min(int(limit), 5000))
-        except Exception as e:
-            raise HTTPException(502, f"economic calendar failed: {e}")
-        if len(econ_cache) >= 64:
-            del econ_cache[min(econ_cache, key=lambda k: econ_cache[k][0])]
-        econ_cache[key] = (time.time(), rows)
-        return rows
+                          limit: int = 5000, provider: str | None = None):
+        p = _source("calendar", provider)
+        response.headers["X-Source"] = p.name
+        lim = min(int(limit), 5000)
+        regions = [r.strip() for r in region.split(",") if r.strip()]
+        return _snap(p, "econ", (region, event, start, end, bool(released), order, lim), 60,
+                     lambda: p.economic_calendar(region=regions or None,
+                                                 event=event or None, start=start,
+                                                 end=end, released_only=bool(released),
+                                                 order=order, limit=lim),
+                     "economic calendar")
 
     # ── ECONOMIC > Indicators / Bond yields / Central banks ───────────
     # The three views past the calendar all read the same two macro datasets
     # (economics series + government yield curves), so they share one catalog
-    # and one series proxy. Key-gated like the calendar: 409 means "connect a
-    # key", which the page renders as a hint rather than a broken table.
-
-    # The catalog is a snapshot the vault rebuilds on its own schedule, not a
-    # live quote, so it caches for an hour; without that every view switch
-    # re-pulls ~15k rows from the API for an answer that cannot have changed.
-    macro_cat_cache: dict[str, tuple[float, list]] = {}
-    macro_series_cache: dict[tuple, tuple[float, list]] = {}
-
-    def _lse_for_macro():
-        try:
-            p = reg.get("lse")
-        except ValueError:
-            raise HTTPException(404, "LSE provider not available")
-        if not p.configured():
-            raise HTTPException(409, "LSE API key not set. Add your free key "
-                                     "to load macro data.")
-        return p
+    # and one series proxy. Key-gated like the calendar.
 
     @app.get("/api/macro/catalog")
-    def macro_catalog():
-        p = _lse_for_macro()
-        hit = macro_cat_cache.get("all")
+    def macro_catalog(response: Response, provider: str | None = None):
+        p = _source("macro", provider)
+        response.headers["X-Source"] = p.name
         # 60s, not an hour: a dataset added on the fleet shows on next open.
-        if hit and time.time() - hit[0] < 60:
-            return hit[1]
-        try:
-            rows = p.macro_catalog()
-        except Exception as e:
-            raise HTTPException(502, f"macro catalog failed: {e}")
-        macro_cat_cache["all"] = (time.time(), rows)
-        return rows
+        return _snap(p, "macro_cat", (), 60, p.macro_catalog, "macro catalog")
 
     @app.get("/api/macro/series")
-    def macro_series(symbol: str, dataset: str = "", start: str | None = None,
-                     end: str | None = None, order: str = "asc",
-                     limit: int = 5000):
-        p = _lse_for_macro()
-        key = (symbol, dataset, start, end, order, min(int(limit), 5000))
-        hit = macro_series_cache.get(key)
+    def macro_series(response: Response, symbol: str, dataset: str = "",
+                     start: str | None = None, end: str | None = None,
+                     order: str = "asc", limit: int = 5000,
+                     provider: str | None = None):
+        p = _source("macro", provider)
+        response.headers["X-Source"] = p.name
+        lim = min(int(limit), 5000)
         # 10 min: macro series print daily at best (most are monthly), and the
         # yield-curve view re-requests the same tenors every time a country is
-        # reselected.
-        if hit and time.time() - hit[0] < 600:
-            return hit[1]
-        try:
-            rows = p.macro_series(symbol, dataset=dataset or None, start=start,
-                                  end=end, order=order,
-                                  limit=min(int(limit), 5000))
-        except Exception as e:
-            raise HTTPException(502, f"macro series failed: {e}")
-        # Bounded like econ_cache, but wider: one country's yield curve alone
-        # opens ~15 entries and a browse walks through many indicators.
-        if len(macro_series_cache) >= 256:
-            del macro_series_cache[min(macro_series_cache,
-                                       key=lambda k: macro_series_cache[k][0])]
-        macro_series_cache[key] = (time.time(), rows)
-        return rows
+        # reselected. Bound 256: one country's yield curve alone opens ~15.
+        return _snap(p, "macro_series", (symbol, dataset, start, end, order, lim), 600,
+                     lambda: p.macro_series(symbol, dataset=dataset or None, start=start,
+                                            end=end, order=order, limit=lim),
+                     "macro series")
 
-    # ── MARKETS > Options: chain + flow tape, LSE-key gated like the
-    #    economic calendar (409 = "connect a key", rendered as a hint by the
-    #    page, never a broken table). Same small TTL cache shape as
-    #    econ_cache: the vault refreshes the chain continuously, so a
-    #    per-click fetch would hammer the API for identical rows.
-    opt_cache: dict[tuple, tuple[float, list]] = {}
-
-    def _lse_for_options():
-        try:
-            p = reg.get("lse")
-        except ValueError:
-            raise HTTPException(404, "LSE provider not available")
-        if not p.configured():
-            raise HTTPException(409, "LSE API key not set. Add your free key "
-                                     "under MARKETS to load options data.")
-        return p
-
-    def _opt_cached(key: tuple, ttl: float, fetch):
-        hit = opt_cache.get(key)
-        if hit and time.time() - hit[0] < ttl:
-            return hit[1]
-        try:
-            rows = fetch()
-        except Exception as e:
-            raise HTTPException(502, f"options request failed: {e}")
-        if len(opt_cache) >= 64:
-            del opt_cache[min(opt_cache, key=lambda k: opt_cache[k][0])]
-        opt_cache[key] = (time.time(), rows)
-        return rows
+    # ── MARKETS > Options: chain + flow tape, key-gated like the economic
+    #    calendar. Short TTL (_snap, tag "opt"): the vault refreshes the
+    #    chain continuously, so a per-click fetch would hammer the API for
+    #    identical rows.
 
     @app.get("/api/options/underlyings")
-    def options_underlyings():
-        p = _lse_for_options()
-        # 1h TTL: the optionable-name list moves on listings, not on ticks.
+    def options_underlyings(response: Response, provider: str | None = None):
+        p = _source("options", provider)
+        response.headers["X-Source"] = p.name
         # 60s, not an hour: a newly optionable symbol shows on next open.
-        return _opt_cached(("und",), 60, p.options_underlyings)
+        return _snap(p, "opt", ("und",), 60, p.options_underlyings, "options request")
 
     @app.get("/api/options/chain")
-    def options_chain(underlying: str, type: str = "", expiry: str = "",
-                      limit: int = 5000):
-        p = _lse_for_options()
+    def options_chain(response: Response, underlying: str, type: str = "",
+                      expiry: str = "", limit: int = 5000,
+                      provider: str | None = None):
+        p = _source("options", provider)
+        response.headers["X-Source"] = p.name
         lim = min(int(limit), 5000)
         # 15s, matching the flow tape: the vault refreshes the chain every
         # minute, but a 30s cache on top of the client's 30s poll made the
         # board feel dead next to the ticking trade dock.
-        key = ("chain", underlying.strip().upper(), type, expiry, lim)
-        return _opt_cached(key, 15, lambda: p.option_chain(
-            underlying.strip(), type=type or None, expiry=expiry or None,
-            limit=lim))
+        return _snap(p, "opt", ("chain", underlying.strip().upper(), type, expiry, lim), 15,
+                     lambda: p.option_chain(underlying.strip(), type=type or None,
+                                            expiry=expiry or None, limit=lim),
+                     "options request")
 
     @app.get("/api/options/flow")
-    def options_flow(underlying: str = "", type: str = "",
-                     min_premium: float = 0, limit: int = 300):
-        p = _lse_for_options()
+    def options_flow(response: Response, underlying: str = "", type: str = "",
+                     min_premium: float = 0, limit: int = 300,
+                     provider: str | None = None):
+        p = _source("flow", provider)
+        response.headers["X-Source"] = p.name
         lim = min(int(limit), 1000)
-        key = ("flow", underlying.strip().upper(), type, float(min_premium), lim)
-        return _opt_cached(key, 15, lambda: p.options_flow(
-            underlying=underlying.strip() or None, type=type or None,
-            min_premium=min_premium or None, limit=lim))
+        return _snap(p, "opt", ("flow", underlying.strip().upper(), type, float(min_premium), lim),
+                     15, lambda: p.options_flow(underlying=underlying.strip() or None,
+                                                type=type or None,
+                                                min_premium=min_premium or None, limit=lim),
+                     "options request")
 
     # ── Level 3 (MBO) data: internal keys only ────────────────────────
     #
@@ -4435,9 +4418,7 @@ def create_app() -> FastAPI:
         """Best-effort economic-events export for econ_* features; None if
         the LSE source is not connected (features then fill with 0)."""
         try:
-            p = reg.get("lse")
-            if not p.configured():
-                return None
+            p = _source("calendar", "lse")  # HTTPException: not connected
             rows = p.economic_calendar(start=start, end=end,
                                        released_only=True, limit=5000)
         except Exception:
@@ -5188,8 +5169,7 @@ def create_app() -> FastAPI:
     lsebank_jobs: dict[str, dict] = {}
 
     def _lse_bank():
-        p = _lse_for_options()  # same guard: provider present + key set
-        return p._lse()
+        return _lse_only()._lse()
 
     def _databank_http_error(e: Exception) -> HTTPException:
         # The SDK raises LSEError(status, message) for any non-2xx from the
@@ -5614,10 +5594,10 @@ def create_app() -> FastAPI:
                                     if (meta.get("kind") == "ohlcv") else [])),
             })
         sets.sort(key=lambda d: (d["folder"], d["name"].lower()))
-        lse_ok = False
         try:
-            lse_ok = bool(reg.get("lse").configured())
-        except Exception:
+            _source("options", "lse")
+            lse_ok = True
+        except HTTPException:
             lse_ok = False
         return {"models": qfit.REQUIREMENTS, "datasets": sets,
                 # Concrete column expectations per requirement, so the UI can
@@ -5654,7 +5634,7 @@ def create_app() -> FastAPI:
                 und = (body.underlying or "").strip().upper()
                 if not und:
                     raise qfit.FitError("pick an underlying for the option chain")
-                rows = _lse_for_options().option_chain(und, limit=5000)
+                rows = _source("options", "lse").option_chain(und, limit=5000)
                 if not rows:
                     raise qfit.FitError(f"no live option chain rows for {und}")
                 frame = _pd.DataFrame(rows)

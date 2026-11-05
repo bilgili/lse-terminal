@@ -11,17 +11,17 @@
 
 ## 2. Server routes and UI (PR 2, no behaviour change for LSE-only users)
 
-- [ ] 2.1 Add `_source(cap, provider)` and `_lse_only()` to `server.py`.
-- [ ] 2.2 Migrate the global routes `/api/screener`, `/api/logos`, `/api/options/underlyings`, `/api/economic-calendar`, `/api/macro/catalog`, and `/api/options/flow` without underlying. Add the optional `provider` parameter.
-- [ ] 2.3 Migrate the symbol-scoped routes `/api/prices`, `/api/options/chain`, `/api/macro/series`, and `/api/options/flow` with underlying. Optional `provider`; without it, the default source (D2: first registered with the capability, configured or not). An explicit provider never falls back. Every capability route sets `X-Source`.
-- [ ] 2.4 Merge `econ_cache`, `macro_cat_cache`, `macro_series_cache` and `opt_cache` into one TTL helper keyed by resolved provider, route tag and arguments; resolver before lookup; per-tag bounds. Keep the TTL values. Delete `_opt_cached`, `_lse_for_options`, `_lse_for_macro`.
-- [ ] 2.5 Migrate `_ml_econ_frame`, the quant fit-info flag, and the quant fit `lse-options` source with explicit `provider="lse"`. The assistant `get_candles` and backtest defaults name a candle source, not a capability; they stay.
-- [ ] 2.6 Keep the databank download on `_lse_only()`.
+- [x] 2.1 Add `_source(cap, provider)` and `_lse_only()` to `server.py`.
+- [x] 2.2 Migrate the global routes `/api/screener`, `/api/logos`, `/api/options/underlyings`, `/api/economic-calendar`, `/api/macro/catalog`, and `/api/options/flow` without underlying. Add the optional `provider` parameter.
+- [x] 2.3 Migrate the symbol-scoped routes `/api/prices`, `/api/options/chain`, `/api/macro/series`, and `/api/options/flow` with underlying. Optional `provider`; without it, the default source (D2: first registered with the capability, configured or not). An explicit provider never falls back. Every capability route sets `X-Source`.
+- [x] 2.4 Merge `econ_cache`, `macro_cat_cache`, `macro_series_cache` and `opt_cache` into one TTL helper keyed by resolved provider, route tag and arguments; resolver before lookup; per-tag bounds. Keep the TTL values. Delete `_opt_cached`, `_lse_for_options`, `_lse_for_macro`.
+- [x] 2.5 Migrate `_ml_econ_frame`, the quant fit-info flag, and the quant fit `lse-options` source with explicit `provider="lse"`. The assistant `get_candles` and backtest defaults name a candle source, not a capability; they stay.
+- [x] 2.6 Keep the databank download on `_lse_only()`.
 - [ ] 2.7 `app.js`: add `capParam(cap)` for listing calls. Symbol calls from a listing send its `X-Source` as `provider`, tape clicks included. The options page saves `{und, src}`; the trade dock keys its list by source. Render 404 as "not supported by this source". Call sites with `provider=lse` keep it.
-- [ ] 2.8 Tests: `FullStubProvider` in `tests/`. One route test per migrated endpoint: explicit provider, default source without provider (LSE even when a configured plugin has the capability), `X-Source` header, sign-out inside the TTL answers 409, 404 on missing capability, 409 on unconfigured, no cross-source call on a scoped 404. `/api/providers` shows the stub as custom with the full capability list. Grep gate for `reg.get("lse")`. Plugin sort order.
+- [x] 2.8 Tests: `FullStubProvider` in `tests/`. One route test per migrated endpoint: explicit provider, default source without provider (LSE even when a configured plugin has the capability), `X-Source` header, sign-out inside the TTL answers 409, 404 on missing capability, 409 on unconfigured, no cross-source call on a scoped 404. `/api/providers` shows the stub as custom with the full capability list. Grep gate for `reg.get("lse")`. Plugin sort order.
 - [x] 2.9 `LseProvider._gate_ts` calls `to_epoch` and only formats the result. Today it parses bounds with its own rules, so `"20240630"` is a date there and epoch seconds in `to_epoch`.
 - [x] 2.10 `engine/quant_fit.py` uses `TIMEFRAME_SECONDS` instead of its own timeframe table, which lacks `30s`.
-- [ ] 2.11 `server.py` reads `is_custom`, `is_broker` and `logos` as attributes, not through `getattr(..., default)`. The base class defines all three since PR 1.
+- [x] 2.11 `server.py` reads `is_custom`, `is_broker` and `logos` as attributes, not through `getattr(..., default)`. The base class defines all three since PR 1.
 - [x] 2.12 `load_plugins` records a `plugin_errors` entry when a plugin replaces an existing provider name (not `Registry.register`: `set_key`, `clear_key` and broker reconnects replace providers on purpose), so a silent override of `lse` or `userdata` is visible. `load_plugins` also states in a `plugin_errors` entry when it cannot set `is_custom` on a plugin (`__slots__` or a read-only property), so the load failure names its cause.
 - [ ] 2.13 Deferred: `BrokerProvider.candles` returns the oldest N bars for a start-anchored call. The adapter protocol `bars.history` takes only `count`, so the fix needs an anchor field in the adapter protocol first. The `ponytail:` comment stays.
 - [x] 2.14 `to_epoch` reads exactly eight unsigned ASCII digits as `YYYYMMDD` UTC (design D3). Test it.
