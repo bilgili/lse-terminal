@@ -11,8 +11,9 @@ Fill rules are D7, checked by openspec/changes/data-source-contract-cache/
 design.tla (flags FixEdge, FixTail, FixTrunc, FixCount, FixLock, PlanWin,
 PlanMissAsIs, TailFromRun, FixHit). Change them only with the model.
 
-The cache fails open: a store error (sqlite3.Error) or a key lock that
-does not come free in LOCK_TIMEOUT seconds passes the call to the source.
+The cache fails open: a store error (sqlite3.Error), a bound the cache
+cannot parse, or a key lock that does not come free in LOCK_TIMEOUT
+seconds passes the call to the source.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import threading
 import time
 
 import pandas as pd
+from fastapi.encoders import jsonable_encoder
 
 from lse_terminal.contracts import CANDLE_COLUMNS, TIMEFRAME_SECONDS, to_epoch
 
@@ -33,6 +35,7 @@ PAGE = 5000            # rows the wrapper asks the source for per page (model Ca
 EMPTY_TTL = 3600       # an empty answer's coverage expires after this (D6)
 LOCK_TIMEOUT = 30      # seconds a call waits for its key lock, then passes through
 HISTORY = -(2 ** 62)   # coverage start for "the source holds nothing older"
+HISTORY_TTL = 86400    # a short newest-N answer's "nothing older" claim expires after this
 
 DEFAULT_TTL = {        # D8; logos are not cached (PR 3 review R5)
     "options_underlyings": 60, "option_chain": 15, "options_flow": 15,
@@ -107,23 +110,35 @@ class CandleCache:
             self._warned = True
             log.warning("market-data cache store failed, passing calls through: %s", exc)
 
-    def clear(self, provider=None, symbol=None, timeframe=None) -> int:
+    def clear(self, provider=None, symbol=None, timeframe=None) -> dict:
         """Drop matching candle keys, each under its own lock (D7.8, PR 3
-        amendment 4). Snapshots only when no symbol/timeframe filter."""
-        n = 0
+        amendment 4). Snapshots only when no symbol/timeframe filter.
+
+        Returns {"cleared": n, "skipped": [[provider, symbol, tf], ...]}.
+        n counts keys the store listed; a key with only a lock (a first-ever
+        fill) is cleared under its lock but not counted. A key whose lock
+        does not come free in LOCK_TIMEOUT is skipped, not cleared."""
+        n, skipped = 0, []
         if self.store is not None:
+            listed = set(self.store.keys())
             with self._guard:
                 filling = list(self._locks)       # a first-ever fill has a lock, no rows
-            for key in sorted({*self.store.keys(), *filling}):
+            for key in sorted({*listed, *filling}):
                 if ((provider is None or key[0] == provider)
                         and (symbol is None or key[1] == symbol)
                         and (timeframe is None or key[2] == timeframe)):
-                    with self.lock(key):                                     # FixLock
+                    lk = self.lock(key)
+                    if not lk.acquire(timeout=LOCK_TIMEOUT):                 # FixLock
+                        skipped.append(list(key))
+                        continue
+                    try:
                         self.store.clear(key)
-                    n += 1
+                    finally:
+                        lk.release()
+                    n += key in listed
         if symbol is None and timeframe is None:
             self.snapshots.snapshot_clear(provider)
-        return n
+        return {"cleared": n, "skipped": skipped}
 
 
 class CachedProvider:
@@ -141,9 +156,13 @@ class CachedProvider:
                 start: str | None = None, end: str | None = None) -> pd.DataFrame:
         inner, c = self._inner, self._cache
         step = TIMEFRAME_SECONDS.get(timeframe)
-        ws, we = to_epoch(start), to_epoch(end)
-        if (c.store is None or step is None or not inner.configured()
-                or (we is not None and ws is None)):                        # D7.1
+        if c.store is None or step is None or not inner.configured() or limit < 1:   # D7.1
+            return inner.candles(symbol, timeframe, limit=limit, start=start, end=end)
+        try:
+            ws, we = to_epoch(start), to_epoch(end)
+        except (ValueError, TypeError):     # the source owns its own bound errors
+            return inner.candles(symbol, timeframe, limit=limit, start=start, end=end)
+        if we is not None and ws is None:                                     # D7.1
             return inner.candles(symbol, timeframe, limit=limit, start=start, end=end)
         key = (inner.name, symbol, timeframe)
         lk = c.lock(key)
@@ -163,24 +182,38 @@ class CachedProvider:
             log.warning("cache lock for %s busy for %ss, passing through", key, LOCK_TIMEOUT)
         return inner.candles(symbol, timeframe, limit=limit, start=start, end=end)
 
+    def _ask(self, symbol, tf, *, limit, start=None, end=None):
+        """The only source call on the cached paths. Returns (raw, df): raw is
+        the source answer as returned; df is raw sorted by ts, deduplicated on
+        ts (last wins) and restricted to [start, end) when given. Truncation is
+        judged on raw; only df is ever stored."""
+        raw = self._inner.candles(symbol, tf, limit=limit, start=start, end=end)
+        df = raw[CANDLE_COLUMNS].sort_values("ts", kind="stable")
+        df = df.drop_duplicates("ts", keep="last")
+        if start is not None:
+            df = df[df["ts"] >= start]
+        if end is not None:
+            df = df[df["ts"] < end]
+        return raw, df.reset_index(drop=True)
+
     def _fill(self, key, symbol, tf, g, h, ws, limit, now):
         """Fill gap [g, h) page by page (D7.3)."""
         st = self._cache.store
         while g < h:
             if st.count(key, ws, g) >= limit:                                # PlanWin stop
                 return
-            df = self._inner.candles(symbol, tf, limit=PAGE, start=g, end=h)
-            df = df[(df["ts"] >= g) & (df["ts"] < h)][CANDLE_COLUMNS]   # contract guard
-            if df.empty:
+            raw, df = self._ask(symbol, tf, limit=PAGE, start=g, end=h)
+            if len(raw) < PAGE:                                              # complete
                 # ponytail: each empty range gets its own empty_until, so off-hours
                 # polls add about one row per poll-minute per key until they expire
                 # (pruned on write). Snap empty_until to a coarse grid if it grows.
-                st.write_page(key, df, g, h, now + EMPTY_TTL, now)          # D7.5
+                st.write_page(key, df, g, h, None if len(df) else now + EMPTY_TTL, now)  # D7.5
                 return
-            if len(df) < PAGE:                                              # complete
-                st.write_page(key, df, g, h, None, now)
+            # FixTrunc: next page after the newest bar the source returned, not
+            # the newest kept one (a source that floors start returns bars < g).
+            last = min(int(raw["ts"].max()) + 1, h)
+            if last <= g:          # a truncated page with nothing at or past g: no progress
                 return
-            last = int(df["ts"].iloc[-1]) + 1                               # FixTrunc
             st.write_page(key, df, g, last, None, now)
             g = last
 
@@ -194,8 +227,8 @@ class CachedProvider:
         body = st.read(key, ws, min(rend, wc))                               # PlanWin
         tail = None
         if (we is None or we > edge) and rend >= wc and limit > len(body):  # FixTail
-            tail = self._inner.candles(symbol, tf, limit=limit - len(body),
-                                       start=max(edge, ws), end=we)
+            _, tail = self._ask(symbol, tf, limit=limit - len(body),
+                                start=max(edge, ws), end=we)
         return _cat(body, tail).head(limit).reset_index(drop=True)
 
     def _limit_only(self, key, symbol, tf, limit, now, edge):
@@ -203,8 +236,8 @@ class CachedProvider:
         rs = runs(st.coverage(key, now))
         if rs and rs[-1][1] <= edge:                                         # FixCount
             c0, c = rs[-1]
-            tail = self._inner.candles(symbol, tf, limit=PAGE, start=c)      # TailFromRun
-            if len(tail) < PAGE:                       # complete since c
+            raw, tail = self._ask(symbol, tf, limit=PAGE, start=c)          # TailFromRun
+            if len(raw) < PAGE:                        # complete since c
                 closed = tail[tail["ts"] < edge][CANDLE_COLUMNS]
                 if len(closed):                        # never an empty range here
                     st.write_page(key, closed, c, edge, None, now)
@@ -212,12 +245,19 @@ class CachedProvider:
                             tail[tail["ts"] >= edge])
                 if len(pool) >= limit or c0 == HISTORY:                      # FixHit
                     return pool.tail(limit).reset_index(drop=True)
-        df = self._inner.candles(symbol, tf, limit=limit)                    # PlanMissAsIs
-        closed = df[df["ts"] < edge][CANDLE_COLUMNS]
+        raw, df = self._ask(symbol, tf, limit=limit)                         # PlanMissAsIs
+        closed = df[df["ts"] < edge]
         if len(closed):
-            s = HISTORY if len(df) < limit else int(closed["ts"].iloc[0])   # FixHit
-            st.write_page(key, closed, s, edge, None, now)
-        return df.reset_index(drop=True)
+            first = int(closed["ts"].iloc[0])
+            st.write_page(key, closed, first, edge, None, now)
+            if len(df) < limit:                                              # FixHit
+                # A short answer is the whole history, but a source may backfill
+                # later: claim "nothing older" only for HISTORY_TTL. runs() joins
+                # this empty range to [first, edge), so c0 == HISTORY hits until it
+                # expires; then the run starts at first and the next call misses
+                # and heals. Expiry only removes coverage, so I1-I3 still hold.
+                st.write_page(key, _empty(), HISTORY, first, now + HISTORY_TTL, now)
+        return raw.reset_index(drop=True)
 
     # ── snapshots (D8) ────────────────────────────────────────────────
     def _snap(self, method: str, canon: list, call):
@@ -228,18 +268,22 @@ class CachedProvider:
         now = c.clock()
         try:
             hit, body = c.snapshots.snapshot_get(key, now)
-        except sqlite3.Error as e:                                           # R2
+        except (sqlite3.Error, ValueError) as e:                             # R2
             c.store_failed(e)
             return call()
         if hit:
             return body
         body = call()
+        # One encode path for both backends: a miss returns the same decoded
+        # types as a hit (datetimes as ISO strings, int keys as str).
         try:
-            c.snapshots.snapshot_put(key, body, now,
+            encoded = json.dumps(jsonable_encoder(body))
+            c.snapshots.snapshot_put(key, encoded, now,
                                      (inner.snapshot_ttl or {}).get(method, DEFAULT_TTL[method]))
-        except sqlite3.Error as e:                                           # R2
+        except (sqlite3.Error, ValueError, TypeError) as e:                  # R2
             c.store_failed(e)
-        return body
+            return body
+        return json.loads(encoded)
 
     def options_underlyings(self):
         return self._snap("options_underlyings", [], self._inner.options_underlyings)

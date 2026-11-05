@@ -1,4 +1,5 @@
 import copy
+import datetime as dt
 import logging
 import random
 import sqlite3
@@ -265,27 +266,31 @@ def test_same_key_one_source_call(env):
         assert_frame_equal(got.reset_index(drop=True), want, check_dtype=False)
 
 
-def test_two_keys_do_not_wait(env):
-    """Spec "Two keys do not serialise"."""
+def test_two_keys_do_not_wait(env, monkeypatch):
+    """Spec "Two keys do not serialise": T completes, cached, while S is blocked."""
     clock, cache, _, _ = env
-    started = threading.Event()
+    monkeypatch.setattr(cachemod, "LOCK_TIMEOUT", 5)   # a shared lock would pass T through
+    started, release = threading.Event(), threading.Event()
 
     class SlowS(Fake):
         def candles(self, symbol, *a, **k):
             if symbol == "S":
                 started.set()
-                time.sleep(2.0)
+                release.wait(30)
             return super().candles(symbol, *a, **k)
 
     fake = SlowS(clock, {"S": grid(T0, 200), "T": grid(T0, 200)})
     w = CachedProvider(fake, cache)
     th = threading.Thread(target=lambda: w.candles("S", "1m", start=T0, limit=50))
     th.start()
-    assert started.wait(2)
-    t = time.monotonic()
-    w.candles("T", "1m", start=T0, limit=50)
-    assert time.monotonic() - t < 1.0
-    th.join()
+    try:
+        assert started.wait(5)
+        w.candles("T", "1m", start=T0, limit=50)
+        assert th.is_alive() and not release.is_set()       # S still blocked
+        assert cache.store.count(("fake", "T", "1m"), 0, 2**62) > 0   # T went through the cache
+    finally:
+        release.set()
+        th.join()
 
 
 def test_clear_waits_for_fill_and_fill_keeps_its_bars(env):
@@ -328,7 +333,8 @@ def test_clear_waits_for_first_ever_fill(env):
     while not cache.lock(KEY).locked() and time.monotonic() < deadline:
         time.sleep(0.005)
     assert cache.lock(KEY).locked() and cache.store.keys() == []
-    cache.clear("fake", "S", "1m")      # returns only after the fill released the lock
+    # returns only after the fill released the lock; a lock-only key is not counted (L3)
+    assert cache.clear("fake", "S", "1m") == {"cleared": 0, "skipped": []}
     th.join()
     assert cache.store.keys() == []
     assert cache.store.read(KEY, 0, 2**62).empty
@@ -338,7 +344,7 @@ def test_clear_one_key_refetches_full_window(env):
     """Spec "Clear one key"."""
     _clock, cache, fake, w = env
     same(w, fake, start=T0, end=T0 + 1800, limit=5000)
-    assert cache.clear("fake", "S", "1m") == 1
+    assert cache.clear("fake", "S", "1m") == {"cleared": 1, "skipped": []}
     n = len(fake.calls)
     same(w, fake, start=T0, end=T0 + 1800, limit=5000)
     assert fake.calls[n:] == [("S", "1m", cachemod.PAGE, T0, T0 + 1800)]
@@ -568,7 +574,8 @@ def test_snapshot_memory_backend(senv):
     w = CachedProvider(fake, CandleCache(store=None, snapshots=MemorySnapshots(), clock=clock))
     a = w.option_chain("SPY")
     clock.t = T0 + 14
-    assert w.option_chain("SPY") is a          # the source's own object, not a copy
+    b = w.option_chain("SPY")
+    assert b == a and b is not a               # a fresh decoded copy (L5)
     clock.t = T0 + 16
     w.option_chain("SPY")
     assert len(fake.snap_calls) == 2
@@ -581,3 +588,136 @@ def test_snapshot_errors_are_not_cached(senv):
         w.option_chain("SPY")
     assert w.option_chain("SPY") == [{"u": "SPY", "n": 2}]
     assert len(fake.snap_calls) == 2
+
+
+# ── pre-merge review fixes ───────────────────────────────────────────────
+class Floor(Fake):
+    """A source that floors start by one bar: it also returns the newest bar
+    before start, and that bar counts against limit."""
+
+    def candles(self, symbol, timeframe, limit=500, start=None, end=None):
+        s = to_epoch(start)
+        if s is not None:
+            prev = [t for t in self.bars.get(symbol, []) if t < s]
+            if prev:
+                start = prev[-1]
+        return super().candles(symbol, timeframe, limit=limit, start=start, end=end)
+
+
+def test_flooring_source_pages_on_raw_length(env, monkeypatch):
+    """H1, probe A: a page of PAGE raw rows is truncated even when one row is
+    before g; no permanent hole (was 6 served instead of 29)."""
+    clock, cache, _, _ = env
+    monkeypatch.setattr(cachemod, "PAGE", 7)
+    fake = Floor(clock, {"S": grid(T0, 200)})
+    w = CachedProvider(fake, cache)
+    kw = {"start": T0, "end": T0 + 29 * 60, "limit": 5000}
+    assert len(same(w, fake, **kw)) == 29
+    n = len(fake.calls)
+    assert len(same(w, fake, **kw)) == 29
+    assert len(fake.calls) == n                      # fully covered: no source call
+
+
+def test_none_volume_source_is_cached(env):
+    """M1, probe B: an all-None volume column is stored as NULL, not a crash."""
+    clock, cache, _, _ = env
+
+    class NoVol(Fake):
+        def candles(self, *a, **k):
+            df = super().candles(*a, **k).astype({"volume": object})
+            df["volume"] = None
+            return df
+
+    fake = NoVol(clock, {"S": grid(T0, 200)})
+    w = CachedProvider(fake, cache)
+    for _ in range(2):
+        got = w.candles("S", "1m", start=T0, limit=5000)
+        want = fake.candles("S", "1m", start=T0, limit=5000)
+        assert_frame_equal(got.drop(columns="volume"), want.drop(columns="volume"),
+                           check_dtype=False)
+        assert got["volume"].isna().all()
+    assert len(cache.store.read(KEY, 0, 2**62)) > 0
+
+
+def test_bad_bound_reaches_source_unchanged(env):
+    """M1: bounds are parsed after the bypass checks; a bad bound passes through."""
+    _clock, cache, fake, w = env
+    seen = []
+    orig = fake.candles
+
+    def spy(symbol, timeframe, limit=500, start=None, end=None):
+        seen.append((timeframe, limit, start, end))
+        if timeframe == "tick":
+            return orig(symbol, timeframe, limit=limit)
+        raise ValueError(f"unparseable bound: {start!r}")
+
+    fake.candles = spy
+    w.candles("S", "tick", limit=5, start="not-a-date")
+    assert seen[-1] == ("tick", 5, "not-a-date", None)
+    with pytest.raises(ValueError, match="unparseable"):
+        w.candles("S", "1m", limit=5, start="not-a-date")
+    assert seen[-1] == ("1m", 5, "not-a-date", None)
+    assert cache.store.keys() == []
+
+
+def test_short_history_expires_and_heals(env):
+    """M2, probe D: a short newest-N answer claims "nothing older" for HISTORY_TTL."""
+    clock, _cache, fake, w = env
+    fake.bars = {"S": grid(T0 + 61 * 60, 40)}
+    assert len(same(w, fake, limit=5000)) == 40
+    fake.bars = {"S": grid(T0 + 60, 100)}            # the source backfills
+    clock.t += 60
+    # accepted: within HISTORY_TTL the wrapped answer is the cached 40-bar history
+    assert len(w.candles("S", "1m", limit=5000)) == 40
+    clock.t += 86401
+    assert len(same(w, fake, limit=5000)) == 100
+    assert len(same(w, fake, start=T0, end=T0 + 30 * 60, limit=5000)) == 29
+
+
+def test_limit_below_one_passes_through(env):
+    """L1: limit < 1 bypasses the cache."""
+    _clock, cache, fake, w = env
+    for kw in ({"limit": 0}, {"limit": 0, "start": T0}, {"limit": -1}):
+        n = len(fake.calls)
+        same(w, fake, **kw)
+        assert fake.calls[n:] == [("S", "1m", kw["limit"], kw.get("start"), None)]
+    assert cache.store.keys() == []
+
+
+def test_clear_skips_a_busy_key(env, monkeypatch):
+    """L2: a key whose lock does not come free is skipped and reported."""
+    _clock, cache, fake, w = env
+    same(w, fake, start=T0, end=T0 + 600, limit=5000)
+    monkeypatch.setattr(cachemod, "LOCK_TIMEOUT", 0.1)
+    with cache.lock(KEY):
+        assert cache.clear() == {"cleared": 0, "skipped": [list(KEY)]}
+    assert cache.store.keys() == [KEY]
+    assert cache.clear() == {"cleared": 1, "skipped": []}
+
+
+def test_clear_one_provider(env):
+    """Spec "Clear one provider" on candles: keys of other providers stay."""
+    clock, cache, fake, w = env
+
+    class B(Fake):
+        name = "b"
+
+    fb = B(clock, {"S": grid(T0, 200)})
+    wb = CachedProvider(fb, cache)
+    same(w, fake, start=T0, end=T0 + 600, limit=5000)
+    same(wb, fb, start=T0, end=T0 + 600, limit=5000)
+    assert cache.clear(provider="fake") == {"cleared": 1, "skipped": []}
+    assert cache.store.keys() == [("b", "S", "1m")]
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "memory"])
+def test_snapshot_miss_equals_hit_and_is_not_shared(senv, backend):
+    """L5: one encode path; a miss returns the decoded types; no shared body."""
+    clock, cache, fake, _ = senv
+    snaps = cache.store if backend == "sqlite" else MemorySnapshots()
+    w = CachedProvider(fake, CandleCache(store=None, snapshots=snaps, clock=clock))
+    fake.option_chain = lambda u, **k: [{"at": dt.datetime(2026, 1, 2, 3, 4, 5), 1: "x"}]
+    miss = w.option_chain("SPY")
+    assert miss == [{"at": "2026-01-02T03:04:05", "1": "x"}]
+    miss[0]["at"] = "changed"
+    assert w.option_chain("SPY") == [{"at": "2026-01-02T03:04:05", "1": "x"}]

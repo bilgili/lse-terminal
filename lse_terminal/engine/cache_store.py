@@ -13,7 +13,6 @@ import threading
 from pathlib import Path
 
 import pandas as pd
-from fastapi.encoders import jsonable_encoder
 
 from lse_terminal.contracts import CANDLE_COLUMNS
 
@@ -77,9 +76,17 @@ class SqliteStore:
                    empty_until: int | None, now: int) -> None:
         """One transaction: upsert the page's bars, then add coverage [s, e)
         merged with overlapping or adjacent ranges of the same kind. Expired
-        empty ranges of the key are dropped on the way."""
-        rows = [(*key, int(r.ts), float(r.open), float(r.high), float(r.low),
-                 float(r.close), float(r.volume)) for r in df.itertuples(index=False)]
+        empty ranges of the key are dropped on the way.
+
+        Prices and volume are coerced to float (a value that is not a number,
+        such as None, is stored as NULL). A ts that is not an integer value
+        raises sqlite3.InterfaceError, so the caller's fail-open path takes it."""
+        ts = pd.to_numeric(df["ts"], errors="coerce")
+        if not (ts % 1 == 0).all():                 # NaN and inf fail this too
+            raise sqlite3.InterfaceError("bar ts is not an integer epoch second")
+        vals = [pd.to_numeric(df[k], errors="coerce").astype("float64").tolist()
+                for k in CANDLE_COLUMNS[1:]]
+        rows = [(*key, *r) for r in zip(ts.astype("int64").tolist(), *vals)]
         c = self._conn()
         c.execute("BEGIN IMMEDIATE")
         try:
@@ -126,11 +133,12 @@ class SqliteStore:
             return False, None
         return True, json.loads(r[1])
 
-    def snapshot_put(self, key: str, body, now: float, ttl: float) -> None:
+    def snapshot_put(self, key: str, encoded: str, now: float, ttl: float) -> None:
+        """encoded: the JSON text of the body (the wrapper encodes)."""
         c = self._conn()
         c.execute("DELETE FROM snapshots WHERE expires<=?", (now,))
         c.execute("INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?)",
-                  (key, now, now + ttl, json.dumps(jsonable_encoder(body))))
+                  (key, now, now + ttl, encoded))
 
     def snapshot_clear(self, provider: str | None = None) -> None:
         if provider is None:
@@ -152,11 +160,12 @@ class SqliteStore:
 class MemorySnapshots:
     """Snapshot TTL cache for hosted mode and LSE_TERMINAL_CACHE=off: the
     same interface as SqliteStore's snapshot half, in process memory,
-    bounded like the route caches it replaces."""
+    bounded like the route caches it replaces. It keeps the JSON text and
+    decodes a fresh copy on every get, so no caller shares a mutable body."""
 
     def __init__(self, bound: int = 512):
         self.bound = bound
-        self._d: dict[str, tuple[float, object]] = {}
+        self._d: dict[str, tuple[float, str]] = {}
         self._lock = threading.Lock()
 
     def snapshot_get(self, key: str, now: float):
@@ -164,15 +173,15 @@ class MemorySnapshots:
             hit = self._d.get(key)
         if hit is None or hit[0] <= now:
             return False, None
-        return True, hit[1]
+        return True, json.loads(hit[1])
 
-    def snapshot_put(self, key: str, body, now: float, ttl: float) -> None:
+    def snapshot_put(self, key: str, encoded: str, now: float, ttl: float) -> None:
         with self._lock:
             for k in [k for k, v in self._d.items() if v[0] <= now]:
                 del self._d[k]
             if key not in self._d and len(self._d) >= self.bound:
                 del self._d[min(self._d, key=lambda k: self._d[k][0])]
-            self._d[key] = (now + ttl, body)
+            self._d[key] = (now + ttl, encoded)
 
     def snapshot_clear(self, provider: str | None = None) -> None:
         prefix = None if provider is None else json.dumps([provider])[:-1] + ","
