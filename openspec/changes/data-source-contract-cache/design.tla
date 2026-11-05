@@ -32,6 +32,23 @@
 (*            edge) as a windowed fill, then runs the hit test             *)
 (*   FixLock  the response read runs under the key lock, and clear takes   *)
 (*            the key lock                                                 *)
+(* PR 3 plan review flags (design-review.md section 5). FALSE everywhere   *)
+(* keeps the first review's meaning; design.cfg runs the implemented set:  *)
+(*   PlanWin      windowed: stop paging once the stored bars in [ws, g)    *)
+(*                reach the limit; serve the covered run from ws clipped   *)
+(*                at wc; tail only when that run reaches wc, with the      *)
+(*                remaining limit, oldest first from max(edge, ws)         *)
+(*   PlanLimTail  limit-only hit tail = candles(start=edge, limit=limit),  *)
+(*                the OLDEST limit bars from edge (plan Task 3.3 as first  *)
+(*                written; design.plan.cfg, I3 violated)                   *)
+(*   PlanMissAsIs a limit-only miss serves the source answer as it is      *)
+(*   ExtOnePage   the limit-only extension fill asks at most one page      *)
+(*   FixHit       a short newest-N answer covers from history start (0);   *)
+(*                without TailFromRun: hit when run + tail >= limit or the *)
+(*                run starts at history start                              *)
+(*   TailFromRun  D7.4 as implemented (R1): no extension fill; one call    *)
+(*                candles(start=c, limit=Cap) from the end c of the newest *)
+(*                covered run, then hit or miss. Needs FixExtend (dec=0).  *)
 (* Fault flags model source behaviour the contract does not forbid today: *)
 (*   Lag > 0      the source clock (or publication) lags ours              *)
 (*   RestateOn    the source corrects one closed bar per key               *)
@@ -51,7 +68,8 @@ CONSTANTS
     Limits,      \* set of `limit` values a call may ask
     Kinds,       \* subset of {"win", "lim"}
     Lag, RestateOn, TransientOn, SkipOn, ClearOn,
-    FixEdge, FixTail, FixTrunc, FixCount, FixExtend, FixLock
+    FixEdge, FixTail, FixTrunc, FixCount, FixExtend, FixLock,
+    PlanWin, PlanLimTail, PlanMissAsIs, ExtOnePage, FixHit, TailFromRun
 
 VARIABLES now, st, cov, lock, pc, call, todo, restated, bad
 
@@ -154,6 +172,7 @@ Lock(r) ==
     /\ todo' = [todo EXCEPT ![r] =
           IF c.kind = "win"
           THEN Gaps(Missing(c.k, c.ws, Min2(c.we, Edge(now))))     \* D7.3
+          ELSE IF TailFromRun THEN {}
           ELSE IF FixExtend                                        \* amended D7.4
                THEN IF cov[c.k] = {} THEN {}
                     ELSE Gaps(Missing(c.k, Max(cov[c.k]) + 1, Edge(now)))
@@ -162,31 +181,61 @@ Lock(r) ==
     /\ UNCHANGED <<now, st, cov, restated>>
     /\ UNCHANGED bad
 
+\* ---- PR 3 plan review helpers (flags: see the header) ----------------
+\* End of the covered run that starts at a (a when a is not covered).
+RunEndFrom(k, a) ==
+    IF a \in cov[k]
+    THEN CHOOSE e \in (a + 1)..MaxTime :
+            (\A y \in a..(e - 1) : y \in cov[k]) /\ e \notin cov[k]
+    ELSE a
+
+BadRec(k, c, t, served, expect) ==
+    [k |-> k, kind |-> c.kind, ws |-> c.ws, we |-> c.we, n |-> c.n,
+     t0 |-> c.t0, t |-> t, served |-> served, expect |-> expect]
+
 \* One source call and one atomic write (bars, then coverage).
+\* g[1] = -1 is the limit-only miss: inner.candles(limit=n), cover
+\* [first_ts, edge) (from 0 with FixHit when the answer is short).
+\* Otherwise a windowed gap: inner.candles(start=g[1], end=g[2], limit=Cap).
 Fill(r) ==
     LET c == call[r]
         k == c.k
         g == CHOOSE x \in todo[r] : \A y \in todo[r] : x[1] <= y[1]
         rest == todo[r] \ {g}
+        stop == /\ PlanWin /\ c.kind = "win"
+                /\ Cardinality({ts \in Stored(k, st) : c.ws <= ts /\ ts < g[1]}) >= c.n
     IN
     /\ pc[r] = "fill"
     /\ todo[r] # {}
-    /\ \E transient \in (IF TransientOn THEN BOOLEAN ELSE {FALSE}) :
+    /\ IF stop
+       THEN /\ todo' = [todo EXCEPT ![r] = {}]
+            /\ UNCHANGED <<st, cov, lock, pc, call, bad>>
+       ELSE (\E transient \in (IF TransientOn THEN BOOLEAN ELSE {FALSE}) :
        IF g[1] = -1
-       THEN \* D7.4 limit-only miss: inner.candles(limit=n), cover [first_ts, horizon)
-            LET full == IF transient THEN {} ELSE ULim(k, c.n, now)
+       THEN LET full == IF transient THEN {} ELSE ULim(k, c.n, now)
                 Drops == IF SkipOn /\ Cardinality(full) >= 3
                          THEN {{}} \cup {{x} : x \in full \ {Min(full), Max(full)}}
                          ELSE {{}}
             IN \E d \in Drops :
                LET ans  == full \ d
                    keep == {ts \in ans : Closed(ts, c.t0)}
-                   cv   == IF ans = {} THEN {} ELSE Range(Min(ans), Edge(c.t0))
+                   short == FixHit /\ ans # {} /\ Cardinality(ans) < c.n
+                   cv   == IF ans = {} THEN {}
+                           ELSE IF short THEN Range(0, Edge(c.t0))
+                           ELSE Range(Min(ans), Edge(c.t0))
+                   expect == ULim(k, c.n, now)
                IN /\ st' = Upsert(k, keep, now)
                   /\ cov' = [cov EXCEPT ![k] = @ \cup cv]
-                  /\ todo' = [todo EXCEPT ![r] = rest]
-       ELSE \* D7.3 windowed gap: inner.candles(start=g[1], end=g[2], limit=Cap)
-            LET ans  == IF transient THEN {} ELSE UWin(k, g[1], g[2], Cap, now)
+                  /\ IF PlanMissAsIs
+                     THEN /\ todo' = [todo EXCEPT ![r] = {}]
+                          /\ pc' = [pc EXCEPT ![r] = "idle"]
+                          /\ call' = [call EXCEPT ![r] = Idle]
+                          /\ lock' = [lock EXCEPT ![k] = NoOne]
+                          /\ bad' = IF ans = expect THEN bad
+                                    ELSE bad \cup {BadRec(k, c, now, ans, expect)}
+                     ELSE /\ todo' = [todo EXCEPT ![r] = rest]
+                          /\ UNCHANGED <<lock, pc, call, bad>>
+       ELSE LET ans  == IF transient THEN {} ELSE UWin(k, g[1], g[2], Cap, now)
                 keep == {ts \in ans : Closed(ts, c.t0)}
                 e    == IF ans = {} THEN Min2(g[2], Edge(c.t0))                 \* D7.5 holiday
                         ELSE IF FixTrunc
@@ -194,31 +243,96 @@ Fill(r) ==
                                   THEN Min2(Min2(g[2], Max(ans) + 1), Edge(c.t0))
                                   ELSE Min2(g[2], Edge(c.t0))
                              ELSE Min2(Min2(g[2], Max(ans) + Step), Edge(c.t0)) \* as written
-                more == IF FixTrunc /\ Cardinality(ans) = Cap /\ e < g[2]
+                more == IF /\ FixTrunc /\ Cardinality(ans) = Cap /\ e < g[2]
+                           /\ ~(ExtOnePage /\ c.kind = "lim")
                         THEN {<<e, g[2]>>} ELSE {}
             IN /\ st' = Upsert(k, keep, now)
                /\ cov' = [cov EXCEPT ![k] = @ \cup Range(g[1], e)]
                /\ todo' = [todo EXCEPT ![r] = rest \cup more]
-    /\ UNCHANGED <<now, lock, pc, call, restated, bad>>
+               /\ UNCHANGED <<lock, pc, call, bad>>)
+    /\ UNCHANGED <<now, restated>>
+
+RunFromS(C, E) ==
+    IF E >= 1 /\ (E - 1) \in C
+    THEN CHOOSE s \in 0..(E - 1) :
+            (\A y \in s..(E - 1) : y \in C) /\ (s = 0 \/ (s - 1) \notin C)
+    ELSE E
 
 \* As written, the lock guards gap computation and fill only (D7.6).
 \* With FixExtend a limit-only call runs its hit test here, after the
 \* extension fill; a miss queues the limit-only fetch and stays in "fill".
+\* With TailFromRun (R1) the tail call, the hit test and the served frame
+\* happen here in one step, at one instant; I3 is checked here for a hit.
 EndFill(r) ==
     LET c == call[r]
+        k == c.k
+        E == Edge(c.t0)
         toRead == /\ pc' = [pc EXCEPT ![r] = "read"]
                   /\ lock' = IF FixLock THEN lock ELSE [lock EXCEPT ![c.k] = NoOne]
+        tl   == {ts \in Visible(k, now) : ts >= E}
+        base == {ts \in Stored(k, st) : RunFrom(k, E) <= ts /\ ts < E}
+        hitF == /\ E >= 1 /\ (E - 1) \in cov[k]
+                /\ \/ Cardinality(base) + Cardinality(tl) >= c.n
+                   \/ RunFrom(k, E) = 0
+        servedF == Largest(base \cup tl, c.n)
+        valF(ts) == IF ts \in tl THEN SrcVal(k, ts, now) ELSE st[k][ts]
+        expectF == ULim(k, c.n, now)
+        okF == servedF = expectF /\ \A ts \in servedF : valF(ts) = SrcVal(k, ts, now)
+        \* TailFromRun: one call candles(start=c, limit=Cap) from the end c of
+        \* the newest covered run. Untruncated: store its closed bars and cover
+        \* [c, E) only when it holds a closed bar; never an empty range.
+        cR    == IF cov[k] = {} THEN -1 ELSE Max(cov[k]) + 1
+        tlR   == IF cR = -1 THEN {} ELSE Smallest({ts \in Visible(k, now) : ts >= cR}, Cap)
+        trR   == cR = -1 \/ Cardinality(tlR) = Cap
+        clR   == {ts \in tlR : Closed(ts, c.t0)}
+        stR   == Upsert(k, clR, now)
+        covR  == IF clR = {} THEN cov[k] ELSE cov[k] \cup Range(cR, E)
+        endR  == IF clR = {} THEN cR ELSE E
+        rsR   == RunFromS(covR, endR)
+        baseR == {ts \in Ticks : stR[k][ts] # NONE /\ rsR <= ts /\ ts < endR}
+        poolR == baseR \cup tlR
+        hitR  == ~trR /\ (Cardinality(poolR) >= c.n \/ rsR = 0)
+        servedR == Largest(poolR, c.n)
+        valR(ts) == IF ts \in tlR THEN SrcVal(k, ts, now) ELSE stR[k][ts]
+        okR == servedR = expectF /\ \A ts \in servedR : valR(ts) = SrcVal(k, ts, now)
     IN
     /\ pc[r] = "fill"
     /\ todo[r] = {}
     /\ IF c.kind = "lim" /\ c.dec = 0
-       THEN /\ call' = [call EXCEPT ![r].dec = 1]
-            /\ IF LimHit(c.k, c.n, c.t0)
-               THEN toRead /\ UNCHANGED todo
-               ELSE /\ todo' = [todo EXCEPT ![r] = {<<-1, -1>>}]
-                    /\ UNCHANGED <<pc, lock>>
-       ELSE toRead /\ UNCHANGED <<call, todo>>
-    /\ UNCHANGED <<now, st, cov, restated, bad>>
+       THEN IF TailFromRun
+            THEN IF hitR
+                 THEN /\ st' = stR
+                      /\ cov' = [cov EXCEPT ![k] = covR]
+                      /\ pc' = [pc EXCEPT ![r] = "idle"]
+                      /\ call' = [call EXCEPT ![r] = Idle]
+                      /\ lock' = [lock EXCEPT ![k] = NoOne]
+                      /\ bad' = IF okR THEN bad
+                                ELSE bad \cup {BadRec(k, c, now, servedR, expectF)}
+                      /\ UNCHANGED todo
+                 ELSE /\ st' = IF trR THEN st ELSE stR
+                      /\ cov' = IF trR THEN cov ELSE [cov EXCEPT ![k] = covR]
+                      /\ call' = [call EXCEPT ![r].dec = 1]
+                      /\ todo' = [todo EXCEPT ![r] = {<<-1, -1>>}]
+                      /\ UNCHANGED <<pc, lock, bad>>
+       ELSE IF FixHit
+            THEN IF hitF
+                 THEN /\ pc' = [pc EXCEPT ![r] = "idle"]
+                      /\ call' = [call EXCEPT ![r] = Idle]
+                      /\ lock' = [lock EXCEPT ![k] = NoOne]
+                      /\ bad' = IF okF THEN bad
+                                ELSE bad \cup {BadRec(k, c, now, servedF, expectF)}
+                      /\ UNCHANGED <<todo, st, cov>>
+                 ELSE /\ call' = [call EXCEPT ![r].dec = 1]
+                      /\ todo' = [todo EXCEPT ![r] = {<<-1, -1>>}]
+                      /\ UNCHANGED <<pc, lock, bad, st, cov>>
+            ELSE /\ call' = [call EXCEPT ![r].dec = 1]
+                 /\ UNCHANGED <<bad, st, cov>>
+                 /\ IF LimHit(c.k, c.n, c.t0)
+                    THEN toRead /\ UNCHANGED todo
+                    ELSE /\ todo' = [todo EXCEPT ![r] = {<<-1, -1>>}]
+                         /\ UNCHANGED <<pc, lock>>
+       ELSE toRead /\ UNCHANGED <<call, todo, bad, st, cov>>
+    /\ UNCHANGED <<now, restated>>
 
 \* D7.2 live tail + the response; I3 is checked here against the unwrapped
 \* provider's answer to the same call at the same instant.
@@ -229,16 +343,26 @@ Read(r) ==
         E == Edge(c.t0)
         reach == c.kind = "lim" \/ c.we > E
         inWin(ts) == c.kind = "lim" \/ (c.ws <= ts /\ ts < c.we)
+        wc   == Min2(c.we, E)
+        rend == IF c.ws < wc THEN RunEndFrom(k, c.ws) ELSE c.ws
+        baseW == {ts \in Stored(k, st) : c.ws <= ts /\ ts < Min2(rend, wc)}
+        tailAll == {ts \in Visible(k, t) : ts >= E /\ inWin(ts)}
         tailAns == IF ~reach THEN {}
-                   ELSE IF FixTail THEN {ts \in Visible(k, t) : ts >= E /\ inWin(ts)}
-                   ELSE Largest(Visible(k, t), 2)                     \* limit=2
-        tailKeep == {ts \in tailAns : Closed(ts, c.t0)}               \* "upserts the closed bar"
+                   ELSE IF PlanWin /\ c.kind = "win"
+                        THEN IF rend >= wc THEN Smallest(tailAll, c.n - Cardinality(baseW))
+                             ELSE {}
+                   ELSE IF PlanLimTail /\ c.kind = "lim"
+                        THEN Smallest(tailAll, c.n)
+                   ELSE IF FixTail THEN tailAll
+                   ELSE Largest(Visible(k, t), 2)
+        tailKeep == {ts \in tailAns : Closed(ts, c.t0)}
         tailOpen == IF FixTail THEN tailAns \ tailKeep
                     ELSE IF tailAns = {} THEN {}
-                    ELSE {ts \in tailAns \ tailKeep : ts = Max(tailAns)} \* "appends the open bar"
+                    ELSE {ts \in tailAns \ tailKeep : ts = Max(tailAns)}
         st2 == Upsert(k, tailKeep, t)
         base == IF c.kind = "win"
-                THEN {ts \in Stored(k, st2) : c.ws <= ts /\ ts < c.we}   \* store.read(ws, we)
+                THEN IF PlanWin THEN baseW
+                     ELSE {ts \in Stored(k, st2) : c.ws <= ts /\ ts < c.we}
                 ELSE IF FixCount
                      THEN {ts \in Stored(k, st2) : RunFrom(k, E) <= ts /\ ts < E}
                      ELSE Stored(k, st2)
@@ -250,10 +374,7 @@ Read(r) ==
     IN
     /\ pc[r] = "read"
     /\ st' = st2
-    /\ bad' = IF ok THEN bad
-              ELSE bad \cup {[k |-> k, kind |-> c.kind, ws |-> c.ws, we |-> c.we,
-                              n |-> c.n, t0 |-> c.t0, t |-> t,
-                              served |-> served, expect |-> expect]}
+    /\ bad' = IF ok THEN bad ELSE bad \cup {BadRec(k, c, t, served, expect)}
     /\ lock' = IF FixLock THEN [lock EXCEPT ![k] = NoOne] ELSE lock
     /\ pc' = [pc EXCEPT ![r] = "idle"]
     /\ call' = [call EXCEPT ![r] = Idle]
@@ -310,7 +431,10 @@ CovBehindSource == \A k \in Keys : \A ts \in cov[k] \cap SrcBars[k] : ClosedAtSr
 I3 == bad = {}
 
 \* L1: with windowed calls only, every closed tick of every key is covered
-\* eventually (the clock stops at MaxTime under WF(Tick)).
+\* eventually (the clock stops at MaxTime under WF(Tick)). With PlanWin the
+\* paging stops at the limit, so L1 holds only when every limit is at least
+\* the number of bars in the window (design.live_impl.cfg passes;
+\* design.cx_l1_limit.cfg, limit 4 under 7 bars, violates L1).
 L1 == \A k \in Keys : <>(Range(0, Edge(MaxTime)) \subseteq cov[k])
 
 Perms == Permutations(Readers)

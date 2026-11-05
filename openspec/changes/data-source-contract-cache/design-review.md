@@ -11,6 +11,7 @@ Files beside the proposal:
 - `design.cx_*.cfg`: one counter-example run per finding. Each run flips one flag.
 - `design.ok_*.cfg`: extra runs that must pass.
 - `design.live_*.cfg`: the L1 liveness runs.
+- `design.plan.cfg`, `design.cx_l1_limit.cfg` and the `*_impl.cfg` runs: the PR 3 plan review (section 5).
 
 Run any of them with `tlc design.tla -config design.<name>.cfg`.
 
@@ -309,3 +310,93 @@ Two spec scenarios contradict D7.4 as written: "Repeat poll" and "First and seco
 14. D6 and D8. Prune expired snapshots. Use `jsonable_encoder` for snapshot bodies. Make snapshot keys canonical. Add the provider TTL override.
 15. D6. One SQLite connection per thread (or one store lock), `busy_timeout`, and no write transaction across a source call.
 16. tasks.md 3.5. Add the seven counter-examples as regression tests. Keep `design.tla` and the configs, and run `tlc design.tla -config design.cfg` in the review gate when D7 changes.
+
+## 5. PR 3 plan review
+
+Scope: Task 3 of `docs/superpowers/plans/2026-11-05-data-source-contract-pr3.md` (the code of `CachedProvider` and `SqliteStore`), checked against `design.tla` and against probes on the plan's own code.
+Method: the reviewer added six flags to `design.tla` that select the plan's rules, and ran TLC on them. This section records the findings (R1 to R9) and the TLC runs on the merged model.
+Verdict: **implement the plan with amendments R1 to R9.** The plan's limit-only hit serves the wrong end of the tail (I3 violated). With R1, every invariant passes.
+
+### 5.1 New flags in `design.tla`
+
+Every flag is `FALSE` in the `cx_*`, `ok_*` and `live_*` configs of section 1, so those runs keep their meaning. `design.cfg` sets the implemented rules: every `Fix*` flag, `PlanWin`, `PlanMissAsIs`, `ExtOnePage`, `FixHit` and `TailFromRun` are `TRUE`, and `PlanLimTail` is `FALSE`.
+
+| Flag | Rule |
+|---|---|
+| PlanWin | A windowed call stops the paging when the stored bars in `[ws, g)` reach `limit`. It serves the covered run from `ws`, clipped at `wc`. It adds the tail only when that run reaches `wc`, with the remaining limit, oldest first from `max(edge, ws)`. |
+| PlanLimTail | A limit-only hit gets its tail from `candles(start=edge, limit=limit)`. That call returns the oldest `limit` bars after `edge`. This is the plan as first written. |
+| PlanMissAsIs | A limit-only miss serves the source answer as it is. |
+| ExtOnePage | The extension fill of a limit-only call asks at most one page. |
+| FixHit | A short newest-N answer covers from the history start (tick 0 in the model). |
+| TailFromRun | D7 rule 4 as rewritten (R1). There is no extension fill. One call `candles(start=c, limit=L)` from the end `c` of the newest covered run gives the tail. Then the call is a hit or a miss. |
+
+### 5.2 Findings
+
+- **R1 (high). Limit-only path.** The plan's hit test `len(run) >= limit` almost never holds after a miss. Its hit tail `candles(start=edge, limit=limit)` returns the oldest bars after `edge`, so the frame misses the newest bars (`design.plan.cfg`, I3 violated, section 5.4). Fix: D7 rule 4 as rewritten. The tail comes from the end of the newest run. A hit is run bars plus tail. A short newest-N answer covers from `HISTORY`. One source call per poll on a covered key.
+- **R2 (high). Fail open.** A store that cannot open, or a `sqlite3.Error` in the cached path, stopped every call. Fix: `create_app` uses `store = None` and `MemorySnapshots`. The wrapper passes a call through to the source on `sqlite3.Error`, for candles and snapshots.
+- **R3 (medium). Lock timeout.** A hung source call held the key lock without a bound. Fix: `lock.acquire(timeout=30)`; on timeout the call passes through to the source.
+- **R4 (medium). The CLI cannot find the engine.** The desktop app starts the engine on the first free port from 7799, and the CLI default is 7787. Fix: the engine writes `config_dir()/engine.json` with `{"port", "pid"}`. `lset cache` reads it and falls back to `--port`.
+- **R5 (medium to low). Logos leave the snapshot cache.** `LseProvider.logos()` returns `{}` on a failed fetch. The wrapper would keep that `{}` for one hour. PR 2 never cached logos. Six snapshot methods remain.
+- **R6 (medium, accepted). Windowed empty-range churn.** A windowed poll off-hours records an empty gap `[prev_edge, edge)` with a unique `empty_until`, so rows do not merge. The prune on write bounds the growth. Accepted for v1. The chart path is limit-only and has no churn after R1.
+- **R7 (low).** `__getattr__` raises `AttributeError` for `_inner`. The store gets `count(key, a, b)` for the paging stop. `write_page` builds its rows before `BEGIN IMMEDIATE`. The `coverage` table has no primary key and deletes rows by `rowid`, because a real range and an empty range can share a `start`.
+- **R8 (low). Tests.** Test 7 holds only with R1. Test 21 uses an unbounded `cap` and `PAGE = 7`.
+- **R9 (low). Model and spec.** This section. L1 is restated: it holds when `limit` is at least the number of bars in the window (`cx_l1_limit` shows the bound).
+
+### 5.3 TLC results
+
+TLC 2.19, `-workers auto` (18 cores), Apple Silicon. Other processes loaded the machine (load average 45 to 100) during these runs, so the times are wall-clock times under load. They are not comparable with section 1.3. TLC stops at the first violation, so a failing run's state count is the part of the graph it searched.
+
+| Config | Flags | Result | Distinct states | Depth | Time |
+|---|---|---|---|---|---|
+| `design.cfg` | implemented (R1), step 1, limits {2, 4}, clear on | PASS (I1, I2, CovBehindSource, I3) | 11,214,231 | 48 | 58 min 29 s |
+| `design.ok_step2_impl.cfg` | implemented, step 2, settle 1, off-grid bar, cap 1 | PASS (I1, I2, CovBehindSource, I3) | 2,895,176 | 43 | 15 min 25 s |
+| `design.ok_step2_s2_impl.cfg` | implemented, step 2, settle 2, 9 ticks | PASS (I1, I2, CovBehindSource, I3) | 859,157 | 34 | 11 s |
+| `design.live_impl.cfg` | implemented, L1, 1 reader, limit 8 | PASS (L1) | 248 | 17 | <1 s |
+| `design.live2_impl.cfg` | implemented, L1, 2 readers, limit 8 | PASS (L1) | 844 | 18 | 4 min 24 s |
+| `design.plan.cfg` | plan as written: PlanLimTail on, FixHit and TailFromRun off | **I3 violated** | 74,311 | 14 | 1 s |
+| `design.cx_l1_limit.cfg` | implemented, L1, 1 reader, limit 4 | **L1 violated** | 256 | – | <1 s |
+| `design.ok_step2.cfg` | section 1 rules, new flags off | PASS | 1,726,280 | 43 | 11 s |
+| `design.ok_step2_s2.cfg` | section 1 rules, new flags off | PASS | 1,001,034 | 40 | 7 s |
+| `design.ok_lag_eq_settle.cfg` | section 1 rules, new flags off | PASS | 5,281,515 | 57 | 16 min 9 s |
+| `design.ok_nolock_noclear.cfg` | section 1 rules, new flags off | PASS | 13,488,044 | 60 | 17 min 10 s (second run; the first run printed no progress for 22 min at load 100, and this review stopped it) |
+| `design.live_fixed.cfg` | section 1 rules, new flags off | PASS (L1) | 248 | 17 | 3 s |
+| `design.live2_fixed.cfg` | section 1 rules, new flags off | PASS (L1) | 844 | 18 | <1 s |
+| `design.live_asis.cfg` | section 1 rules, new flags off | PASS (L1) | 94,476 | 56 | 20 min 44 s |
+| `design.cx_tail.cfg` | new flags off | **I3 violated** | 3,788 | 10 | <1 s |
+| `design.cx_edge.cfg` | new flags off | **I2 violated** | 1,183 | 8 | <1 s |
+| `design.cx_edge_i3.cfg` | new flags off | **I3 violated** | 4,813 | 10 | <1 s |
+| `design.cx_trunc.cfg` | new flags off | **I3 violated** | 13,781 | 12 | <1 s |
+| `design.cx_count.cfg` | new flags off | **I3 violated** | 1,414,234 | 24 | 8 s |
+| `design.cx_lock.cfg` | new flags off | **I3 violated** | 9,018 | 10 | <1 s |
+| `design.cx_irr.cfg` | new flags off | **I2 violated** | 5,963 | 9 | <1 s |
+| `design.cx_restate.cfg` | new flags off | **I2 violated** | 4,965 | 8 | <1 s |
+| `design.cx_lag.cfg` | new flags off | **I1 violated** | 815 | 8 | <1 s |
+| `design.cx_transient.cfg` | new flags off | **I2 violated** | 1,000 | 8 | <1 s |
+| `design.cx_skip.cfg` | new flags off | **I2 violated** | 3,079 | 9 | <1 s |
+
+Every `cx_*` run violates the same property as in section 1.3. The state counts differ a little from section 1.3, because the order of the parallel search changes which counter-example TLC finds first. `design.live2_asis.cfg` did not run again; section 1.3 records that it does not finish.
+
+The reviewer's scratch runs also passed the implemented rules with limits {1, 2, 4}: 26,947,596 distinct states for step 1, and 2,079,199 for step 2 with settle 2.
+
+### 5.4 Counter-example: the plan's limit-only hit tail
+
+`design.plan.cfg`. Step 1, settle 1. Key `A` has bars at 0, 1, 2, 4, 5, 6, 7 (holiday at 3).
+
+```
+now=5  r2 limit-only 4 on A, t0=5, edge=4: no coverage, miss
+       r2 Fill   newest 4 = {1,2,4,5}, served as is; stores {1,2}; coverage [1,4)
+now=5  r1 limit-only 2 on A, Lock t0=5, edge=4: the run [1,4) reaches the edge
+now=6  r1 hit test: the run holds 2 stored bars >= 2, so "hit"
+       r1 Read   tail = candles(start=4, limit=2) = oldest 2 from 4 = {4,5}
+       served newest 2 of {1,2} + {4,5} = {4,5}   unwrapped {5,6}   I3 violated
+```
+
+The tail call takes the oldest bars after the edge, so a hit drops every bar after the first `limit` tail bars. R1 takes the whole tail from the end of the run and serves the newest `limit` bars of run plus tail.
+
+### 5.5 What the model does not cover
+
+- **R2 fail open and R3 lock timeout.** Both send the call to the source without the store. That answer is the unwrapped answer by definition, so I3 holds with no model. The model has no store errors and no timeouts.
+- **R4 CLI, R5 logos, R7 and R8.** These are process, code and test points with no ordering protocol.
+- **R6 churn.** The model holds coverage as a set of ticks. It has no rows and no `empty_until`, so it cannot count rows.
+- **`HISTORY`.** The model uses tick 0 as the history start. The guard `c <= edge` of R1 always holds in the model, because coverage never passes the edge.
+- **Limits.** `design.cfg` checks limits {2, 4}. Limit 1 passed only in the reviewer's scratch run.
