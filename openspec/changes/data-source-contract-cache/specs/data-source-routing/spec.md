@@ -39,7 +39,7 @@ Without `provider`, every capability route SHALL use the default source for `cap
 - **THEN** `alpha` registers before `zeta` regardless of discovery order
 
 ### Requirement: Routes name the source that answered
-Every capability route SHALL answer with the header `X-Source` set to the name of the provider it resolved.
+Every successful answer of a capability route SHALL carry the header `X-Source` set to the name of the provider it resolved. An error answer SHALL NOT be used to pin a source.
 
 #### Scenario: Header on a default-source answer
 - **WHEN** `/api/options/underlyings` is called without `provider` and LSE answers
