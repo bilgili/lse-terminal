@@ -865,3 +865,23 @@ def _cache_cmd(argv: list[str]) -> int:
 - [ ] **6.2** Opus pre-merge review over `git diff develop...feat/pr3-cache`, given the spec and this plan, not conclusions.
 - [ ] **6.3** Fold the findings. Re-run the suite.
 - [ ] **6.4** `openspec validate data-source-contract-cache`. Fast-forward `develop`, push `origin/develop`, remove the worktree. Archive the change (`openspec archive`) only after the user confirms PR 4 does not need it open.
+
+---
+
+## Design review amendments (2026-11-05, before Task 3)
+
+An Opus review checked the plan's Task 3 code against `design.tla` (scratch model with plan flags) and against probes on the plan's own code. These amendments override the Task 3, 4 and 5 text above where they differ.
+
+- **R1 (HIGH) Limit-only path: tail from the newest run, hit on run + tail.** The plan's hit test `len(run) >= limit` almost never holds after a miss, and its hit tail `candles(start=edge, limit=limit)` returns the wrong end (TLC `plan.cfg`: I3 violated). Replace `_limit_only` with:
+  1. `rs = runs(coverage)`. If `rs` and `rs[-1][1] <= edge`: `c0, c = rs[-1]`; `tail = inner.candles(symbol, tf, limit=PAGE, start=c)`.
+  2. If `len(tail) < PAGE` (complete since `c`): store the closed bars (`ts < edge`) with coverage `[c, edge)` only when there is at least one closed bar (never an empty range here). `pool = store.read(key, c0, edge)` + `tail[ts >= edge]`. If `len(pool) >= limit` or `c0 == HISTORY`, serve `pool.tail(limit)`.
+  3. Otherwise (no coverage, truncated tail, or too few bars): miss. `df = inner.candles(symbol, tf, limit=limit)`; store `df[ts < edge]` with coverage from `HISTORY` when `len(df) < limit` (a short answer is the whole history, contract clause), else from `first_ts`, to `edge`; serve `df` as is.
+  `HISTORY = -(2**62)`. TLC passes this (`fixed.cfg` 11.45M states, `tfr.cfg` 26.95M, step-2 variants). One source call per poll.
+- **R2 (HIGH) Fail open.** `create_app`: when `SqliteStore(...)` raises, log it and use `store=None` + `MemorySnapshots`. `CachedProvider`: any `sqlite3.Error` in the cached path passes the call through to the source (I3-safe); same for snapshot get/put.
+- **R3 (MEDIUM) Lock timeout.** `lock.acquire(timeout=30)`; on timeout pass the call through to the source.
+- **R4 (MEDIUM) CLI finds the engine.** The desktop app starts the engine on the first free port from 7799 (`desktop/main.js`), the CLI defaults to 7787. The engine process writes `config_dir()/engine.json` = `{"port", "pid"}` at start; `lset cache` reads it (falls back to `--port`); it uses the file directly only when no engine answers.
+- **R5 (MEDIUM-LOW) Logos leave the snapshot cache.** `LseProvider.logos()` returns `{}` on a failed fetch and memoizes only success; the wrapper would pin that `{}` for an hour. PR 2 never cached logos. Six snapshot methods, not seven.
+- **R6 (MEDIUM, accepted) Windowed empty-range churn.** A windowed poll's gap `[prev_edge, edge)` is often empty off-hours and is stored with a unique `empty_until`, so rows do not merge. Expired rows are pruned on write; growth is bounded by about one row per poll-minute per key for an hour. Accepted for v1 with a `ponytail:` comment; the chart path (limit-only) has no churn after R1.
+- **R7 (LOW)** `__getattr__` raises `AttributeError` for `_inner` (copy/pickle recursion); other underscore names still delegate (`_lse_only()._lse()` needs `_lse`). Store gets `count(key, a, b)` (one `COUNT(*)`), used by the paging stop. `write_page` builds its rows before `BEGIN IMMEDIATE`.
+- **R8 (LOW) Tests.** Test 7's expectation holds only with R1. Test 21: `cap` unbounded (a capping source violates the contract and caps the reference call too), `PAGE = 7`.
+- **R9 (LOW) Model and spec.** Fold the review's flags into `design.tla`; `design.cfg` runs the implemented rules. Restate L1: it holds when `limit` is at least the number of bars in the window. Spec scenarios "Limit-only fill", "Invalidation", "Snapshot cache", "Repeat poll", "First and second call" follow R1, R5 and amendment 5.
