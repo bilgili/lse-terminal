@@ -43,7 +43,12 @@ def to_epoch(bound: int | float | str | None) -> int | None:
     if not s:
         return None
     if len(s) == 8 and s.isascii() and s.isdigit():
-        return int(datetime.strptime(s, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp())
+        try:
+            dt = datetime.strptime(s, "%Y%m%d")
+        except ValueError as e:
+            # Not a real date: never fall back to 1970 epoch seconds.
+            raise ValueError(f"unparseable bound: {bound!r}") from e
+        return int(dt.replace(tzinfo=timezone.utc).timestamp())
     d = s.lstrip("-")
     if d.isascii() and d.isdigit():
         return int(s)

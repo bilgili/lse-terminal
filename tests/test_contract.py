@@ -437,3 +437,9 @@ def test_tf_label_thirty_seconds():
     assert _tf_label(30.0) == "30s"
     assert _tf_label(60.0) == "1m"
     assert _tf_label(86400.0) == "1d"
+
+
+@pytest.mark.parametrize("s", ["99999999", "10000000", "20241301"])
+def test_to_epoch_rejects_eight_digits_that_are_not_a_date(s):
+    with pytest.raises(ValueError, match="unparseable bound"):
+        to_epoch(s)
