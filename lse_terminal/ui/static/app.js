@@ -10599,11 +10599,14 @@ function optSetView(view) {
 
 async function optLoadUnderlyings() {
   try {
-    optState.undKey = capParam("options");
-    const r = await fetch("/api/options/underlyings?" + optState.undKey.slice(1));
-    if (!r.ok) { optRenderList(); return; } // keyless: rail shows the hint
+    const key = capParam("options");
+    const r = await fetch("/api/options/underlyings?" + key.slice(1));
+    if (!r.ok) { // keyless: drop the old source's list so the rail shows the hint
+      optState.unds = []; optState.src = ""; optState.undKey = ""; optRenderList(); return;
+    }
     optState.unds = await r.json();
     optState.src = r.headers.get("X-Source") || "";
+    optState.undKey = key;
     // A symbol listed by another source (stale restore, or a source switch)
     // is not on this rail: drop it rather than ask the wrong source.
     if (optState.und && optState.undSrc && optState.undSrc !== optState.src) {
@@ -10612,7 +10615,7 @@ async function optLoadUnderlyings() {
       optSavePrefs();
       optRefresh(true);
     }
-  } catch (e) { /* rail falls back to its connect hint */ }
+  } catch (e) { optState.unds = []; optState.src = ""; optState.undKey = ""; /* rail falls back to its connect hint */ }
   optRenderList(true);
   // Company logos ride in after the list paints (same map the watchlist
   // uses); rows re-render once with images over their monogram fallbacks.
@@ -10735,7 +10738,7 @@ async function optRefresh(quiet) {
     : `/api/options/flow?underlying=${encodeURIComponent(optState.und)}` +
       `&type=${encodeURIComponent($("opt-type").value)}` +
       `&min_premium=${$("opt-minprem").value || 0}&limit=300` + src;
-  let rows;
+  let rows, rowsSrc;
   try {
     const r = await fetch(url);
     if (!r.ok) {
@@ -10745,7 +10748,7 @@ async function optRefresh(quiet) {
       throw new Error(msg);
     }
     rows = await r.json();
-    if (!chain && !optState.und) optState.tapeSrc = r.headers.get("X-Source") || "";
+    rowsSrc = r.headers.get("X-Source") || "";
   } catch (e) {
     if (!quiet && seq === optState.seq) {
       // The upstream rejects non-ticker charsets (spaces, punctuation) with
@@ -10766,6 +10769,8 @@ async function optRefresh(quiet) {
     optState.chainRows = rows;
     optRenderChain(rows, quiet);
   } else {
+    // The tape on screen pins its source; a missing header keeps the old pin.
+    if (rowsSrc) optState.tapeSrc = rowsSrc;
     optRenderFlow(rows, quiet);
   }
 }
@@ -16286,12 +16291,16 @@ async function rwPaintEcon(body) {
 
 async function rwPaintOpts(body) {
   if (!rw.undList || capParam("options") !== rw.undKey) {
-    rw.undKey = capParam("options");
+    const key = capParam("options");
     rw.optExpiry = null; // the old source's expiry means nothing here
-    const r = await fetch("/api/options/underlyings?" + rw.undKey.slice(1));
+    // A failed load clears the old source's list so the next tick retries
+    // and nothing is asked of the old source.
+    rw.undList = null; rw.undSrc = "";
+    const r = await fetch("/api/options/underlyings?" + key.slice(1));
     if (r.status === 409) { body.textContent = "add your free LSE key to load options"; return; }
     if (!r.ok) { body.textContent = "options unavailable"; return; }
     const l = await r.json();
+    rw.undKey = key;
     rw.undSrc = r.headers.get("X-Source") || "";
     rw.undList = new Set((Array.isArray(l) ? l : []).map((u) =>
       String(u.symbol || u.underlying || u).toUpperCase()));
