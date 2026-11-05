@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
+import sqlite3
 import sys
 import types
 import time
@@ -528,8 +530,30 @@ class _HostedRateLimit:
                             b'retry shortly."}'})
 
 
+log = logging.getLogger("lse_terminal")
+
+
 def create_app() -> FastAPI:
-    reg = Registry()
+    # Hosted mode (the site-embedded terminal): endpoints that write to the
+    # host machine or execute user Python are disabled, because the server is
+    # shared by every visitor instead of owned by one user. The UI hides the
+    # corresponding buttons via /api/config.
+    hosted = os.environ.get("LSE_TERMINAL_HOSTED") == "1"
+
+    # One market-data cache for every provider (design D5). Hosted and
+    # LSE_TERMINAL_CACHE=off keep snapshots in memory and write no file; an
+    # unopenable file fails open the same way (PR 3 review R2).
+    from lse_terminal.engine.cache import CandleCache
+    from lse_terminal.engine.cache_store import MemorySnapshots, SqliteStore
+    store = None
+    if not hosted and os.environ.get("LSE_TERMINAL_CACHE", "").strip().lower() != "off":
+        try:
+            store = SqliteStore(cfg.config_dir() / "cache.sqlite")
+        except (sqlite3.Error, OSError) as e:
+            log.warning("market-data cache disabled, cannot open %s: %s",
+                        cfg.config_dir() / "cache.sqlite", e)
+    cache = CandleCache(store=store, snapshots=store or MemorySnapshots())
+    reg = Registry(cache=cache)
     load_builtins(reg)
     load_plugins(reg)
     # Bundled Brue indicators registered at lse_terminal.indicators import
@@ -544,12 +568,6 @@ def create_app() -> FastAPI:
     # imports). No-op the moment a manifest exists.
     from lse_terminal.providers import userdata as _userdata
     _userdata.seed_samples()
-
-    # Hosted mode (the site-embedded terminal): endpoints that write to the
-    # host machine or execute user Python are disabled, because the server is
-    # shared by every visitor instead of owned by one user. The UI hides the
-    # corresponding buttons via /api/config.
-    hosted = os.environ.get("LSE_TERMINAL_HOSTED") == "1"
 
     async def deny_hosted_ws(websocket) -> bool:
         """True when the socket was refused because this is the hosted
@@ -576,6 +594,7 @@ def create_app() -> FastAPI:
                      "from GitHub to use this")
 
     app = FastAPI(title="LSE Terminal", version=__version__)
+    app.state.cache = cache
     if not hosted:
         app.add_middleware(_LocalOnlyGuard)
     else:
@@ -737,29 +756,6 @@ def create_app() -> FastAPI:
             raise HTTPException(409, p.setup_hint("options"))
         return p
 
-    # One TTL cache for the snapshot routes until the wrapper snapshot
-    # cache lands (PR 3, task 3.9). Key = resolved provider, route tag,
-    # canonical args; the caller resolves (and checks the key) first, so
-    # a signed-out source never serves a cached row. Bounds per tag, as
-    # the four caches this replaces had (the catalog had one key; now one
-    # per source).
-    _SNAP_BOUND = {"econ": 64, "macro_cat": 8, "macro_series": 256, "opt": 64}
-    snap_cache: dict[str, dict[tuple, tuple[float, object]]] = {k: {} for k in _SNAP_BOUND}
-
-    def _snap(p, tag: str, args: tuple, ttl: float, fetch, what: str):
-        c = snap_cache[tag]
-        k = (p.name, *args)
-        hit = c.get(k)
-        if hit and time.time() - hit[0] < ttl:
-            return hit[1]
-        rows = _call(fetch, what)
-        if len(c) >= _SNAP_BOUND[tag]:
-            # Threadpool routes: list() is atomic under the GIL, pop tolerates a racing evict.
-            old = min(list(c.items()), key=lambda kv: kv[1][0])[0]
-            c.pop(old, None)
-        c[k] = (time.time(), rows)
-        return rows
-
     def _call(fetch, what: str):
         try:
             return fetch()
@@ -767,6 +763,18 @@ def create_app() -> FastAPI:
             raise HTTPException(404, str(e))
         except Exception as e:
             raise HTTPException(502, f"{what} failed: {e}")
+
+    @app.get("/api/cache/stats")
+    def cache_stats():
+        deny_hosted()
+        c = app.state.cache
+        return {"enabled": c.store is not None, **(c.store.stats() if c.store else {})}
+
+    @app.delete("/api/cache")
+    def cache_clear(provider: str | None = None, symbol: str | None = None,
+                    timeframe: str | None = None):
+        deny_hosted()
+        return {"cleared": app.state.cache.clear(provider, symbol, timeframe)}
 
     @app.get("/api/prices")
     def prices(response: Response, symbols: str, provider: str | None = None):
@@ -1117,8 +1125,8 @@ def create_app() -> FastAPI:
     # ── Economic calendar: LSE macro-event feed ───────────────────────
 
     # Filter flips in the calendar UI re-request the same windows over and
-    # over; a short TTL cache (_snap, tag "econ", 60s) keeps that snappy and
-    # spares the remote API. 409 = "connect a key", rendered as a hint.
+    # over; the wrapper's 60s snapshot cache (engine/cache.py) keeps that
+    # snappy and spares the remote API. 409 = "connect a key", rendered as a hint.
     @app.get("/api/economic-calendar")
     def economic_calendar(response: Response, region: str = "", event: str = "",
                           start: str | None = None, end: str | None = None,
@@ -1127,8 +1135,7 @@ def create_app() -> FastAPI:
         p = _source("calendar", provider, response=response)
         lim = min(int(limit), 5000)
         regions = [r.strip() for r in region.split(",") if r.strip()]
-        return _snap(p, "econ", (region, event, start, end, bool(released), order, lim), 60,
-                     lambda: p.economic_calendar(region=regions or None,
+        return _call(lambda: p.economic_calendar(region=regions or None,
                                                  event=event or None, start=start,
                                                  end=end, released_only=bool(released),
                                                  order=order, limit=lim),
@@ -1143,7 +1150,7 @@ def create_app() -> FastAPI:
     def macro_catalog(response: Response, provider: str | None = None):
         p = _source("macro", provider, response=response)
         # 60s, not an hour: a dataset added on the fleet shows on next open.
-        return _snap(p, "macro_cat", (), 60, p.macro_catalog, "macro catalog")
+        return _call(p.macro_catalog, "macro catalog")
 
     @app.get("/api/macro/series")
     def macro_series(response: Response, symbol: str, dataset: str = "",
@@ -1155,13 +1162,12 @@ def create_app() -> FastAPI:
         # 10 min: macro series print daily at best (most are monthly), and the
         # yield-curve view re-requests the same tenors every time a country is
         # reselected. Bound 256: one country's yield curve alone opens ~15.
-        return _snap(p, "macro_series", (symbol, dataset, start, end, order, lim), 600,
-                     lambda: p.macro_series(symbol, dataset=dataset or None, start=start,
+        return _call(lambda: p.macro_series(symbol, dataset=dataset or None, start=start,
                                             end=end, order=order, limit=lim),
                      "macro series")
 
     # ── MARKETS > Options: chain + flow tape, key-gated like the economic
-    #    calendar. Short TTL (_snap, tag "opt"): the vault refreshes the
+    #    calendar. Short TTL (wrapper snapshot cache): the vault refreshes the
     #    chain continuously, so a per-click fetch would hammer the API for
     #    identical rows.
 
@@ -1169,7 +1175,7 @@ def create_app() -> FastAPI:
     def options_underlyings(response: Response, provider: str | None = None):
         p = _source("options", provider, response=response)
         # 60s, not an hour: a newly optionable symbol shows on next open.
-        return _snap(p, "opt", ("und",), 60, p.options_underlyings, "options request")
+        return _call(p.options_underlyings, "options request")
 
     @app.get("/api/options/chain")
     def options_chain(response: Response, underlying: str, type: str = "",
@@ -1180,8 +1186,7 @@ def create_app() -> FastAPI:
         # 15s, matching the flow tape: the vault refreshes the chain every
         # minute, but a 30s cache on top of the client's 30s poll made the
         # board feel dead next to the ticking trade dock.
-        return _snap(p, "opt", ("chain", underlying.strip().upper(), type, expiry, lim), 15,
-                     lambda: p.option_chain(underlying.strip(), type=type or None,
+        return _call(lambda: p.option_chain(underlying.strip(), type=type or None,
                                             expiry=expiry or None, limit=lim),
                      "options request")
 
@@ -1191,10 +1196,9 @@ def create_app() -> FastAPI:
                      provider: str | None = None):
         p = _source("flow", provider, response=response)
         lim = min(int(limit), 1000)
-        return _snap(p, "opt", ("flow", underlying.strip().upper(), type, float(min_premium), lim),
-                     15, lambda: p.options_flow(underlying=underlying.strip() or None,
-                                                type=type or None,
-                                                min_premium=min_premium or None, limit=lim),
+        return _call(lambda: p.options_flow(underlying=underlying.strip() or None,
+                                            type=type or None,
+                                            min_premium=min_premium or None, limit=lim),
                      "options request")
 
     # ── Level 3 (MBO) data: internal keys only ────────────────────────

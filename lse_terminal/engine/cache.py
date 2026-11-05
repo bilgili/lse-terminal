@@ -112,7 +112,9 @@ class CandleCache:
         amendment 4). Snapshots only when no symbol/timeframe filter."""
         n = 0
         if self.store is not None:
-            for key in sorted(self.store.keys()):
+            with self._guard:
+                filling = list(self._locks)       # a first-ever fill has a lock, no rows
+            for key in sorted({*self.store.keys(), *filling}):
                 if ((provider is None or key[0] == provider)
                         and (symbol is None or key[1] == symbol)
                         and (timeframe is None or key[2] == timeframe)):

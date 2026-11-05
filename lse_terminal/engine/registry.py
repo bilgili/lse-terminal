@@ -24,14 +24,18 @@ log = logging.getLogger("lse_terminal")
 
 
 class Registry:
-    def __init__(self):
+    def __init__(self, cache=None):
         self._providers: dict[str, Provider] = {}
         self._engines: dict = {}
         self.plugin_errors: list[str] = []
+        self.cache = cache          # CandleCache; None = never wrap (tests, tools)
 
     def register(self, provider: Provider) -> None:
         if not provider.name:
             raise ValueError(f"{type(provider).__name__} has an empty name")
+        if self.cache is not None and provider.cacheable:
+            from lse_terminal.engine.cache import CachedProvider
+            provider = CachedProvider(provider, self.cache)
         self._providers[provider.name] = provider
 
     def get(self, name: str) -> Provider:

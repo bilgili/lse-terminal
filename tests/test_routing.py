@@ -297,14 +297,10 @@ def test_error_answers_carry_no_x_source(client, stub):
 
 
 @pytest.fixture()
-def clock(monkeypatch):
-    """The `time` module server.py sees, with a settable time()."""
-    import time as _time
-
-    from lse_terminal.engine import server
+def clock(client):
+    """The cache's settable clock; every snapshot TTL reads it."""
     now = [1000.0]
-    fake = SimpleNamespace(**{**vars(_time), "time": lambda: now[0]})
-    monkeypatch.setattr(server, "time", fake)
+    client.app.state.cache.clock = lambda: now[0]
     return now
 
 
@@ -339,3 +335,53 @@ def test_flow_without_underlying_default_source(client, lse):
 def test_databank_unconfigured_is_409_with_options_hint(client):
     r = client.get("/api/lse/databank")
     assert (r.status_code, r.json()["detail"]) == (409, OPT)
+
+
+def _app(tmp_path, monkeypatch, stub, **env):
+    monkeypatch.setenv("LSE_TERMINAL_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("LSE_API_KEY", raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    eps = [SimpleNamespace(name="stub", load=lambda: stub)]
+    monkeypatch.setattr(regmod, "entry_points",
+                        lambda group: eps if group == "lse_terminal.providers" else [])
+    return TestClient(create_app(), base_url="http://127.0.0.1")
+
+
+def test_cache_stats_and_clear(client, stub, tmp_path):
+    q = {"underlying": "X", "provider": "stub"}
+    client.get("/api/options/chain", params=q)
+    r = client.get("/api/cache/stats")
+    assert r.status_code == 200 and r.json()["enabled"] is True
+    assert "bars" in r.json() and "bytes" in r.json()
+    assert (tmp_path / "cache.sqlite").exists()
+    assert client.delete("/api/cache", params={"provider": "stub"}).status_code == 200
+    client.get("/api/options/chain", params=q)
+    assert stub.calls == {"option_chain": 2}
+
+
+def test_cache_routes_denied_when_hosted(tmp_path, monkeypatch, stub):
+    c = _app(tmp_path, monkeypatch, stub, LSE_TERMINAL_HOSTED="1")
+    assert c.get("/api/cache/stats").status_code == 403
+    assert c.delete("/api/cache").status_code == 403
+    assert not (tmp_path / "cache.sqlite").exists()
+
+
+def test_cache_off_has_no_file_and_ttl_holds(tmp_path, monkeypatch, stub):
+    c = _app(tmp_path, monkeypatch, stub, LSE_TERMINAL_CACHE="off")
+    q = {"underlying": "X", "provider": "stub"}
+    c.get("/api/options/chain", params=q)
+    c.get("/api/options/chain", params=q)
+    assert stub.calls == {"option_chain": 1}
+    assert not (tmp_path / "cache.sqlite").exists()
+    assert c.get("/api/cache/stats").json() == {"enabled": False}
+
+
+def test_unopenable_store_fails_open(tmp_path, monkeypatch, stub):
+    (tmp_path / "cache.sqlite").mkdir()
+    c = _app(tmp_path, monkeypatch, stub)
+    assert c.get("/api/cache/stats").json()["enabled"] is False
+    q = {"underlying": "X", "provider": "stub"}
+    c.get("/api/options/chain", params=q)
+    c.get("/api/options/chain", params=q)
+    assert stub.calls == {"option_chain": 1}

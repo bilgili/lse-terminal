@@ -317,6 +317,23 @@ def test_clear_waits_for_fill_and_fill_keeps_its_bars(env):
     assert cache.store.coverage(KEY, clock()) == []
 
 
+def test_clear_waits_for_first_ever_fill(env):
+    """A key with no rows yet is still locked by its fill: clear waits."""
+    _clock, cache, fake, w = env
+    fake.delay = 0.3
+    kw = {"start": T0, "end": T0 + 1800, "limit": 5000}
+    th = threading.Thread(target=lambda: w.candles("S", "1m", **kw))
+    th.start()
+    deadline = time.monotonic() + 2
+    while not cache.lock(KEY).locked() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert cache.lock(KEY).locked() and cache.store.keys() == []
+    cache.clear("fake", "S", "1m")      # returns only after the fill released the lock
+    th.join()
+    assert cache.store.keys() == []
+    assert cache.store.read(KEY, 0, 2**62).empty
+
+
 def test_clear_one_key_refetches_full_window(env):
     """Spec "Clear one key"."""
     _clock, cache, fake, w = env

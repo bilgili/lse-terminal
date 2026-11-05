@@ -95,3 +95,33 @@ def test_plugin_with_unsettable_is_custom_is_reported(monkeypatch):
     assert len(reg.plugin_errors) == 1
     assert "'slot'" in reg.plugin_errors[0]
     assert "cannot set is_custom" in reg.plugin_errors[0]
+
+
+def test_cache_wraps_cacheable_provider_only(tmp_path):
+    from lse_terminal.engine.cache import CachedProvider, CandleCache
+    from lse_terminal.engine.cache_store import MemorySnapshots
+    cache = CandleCache(store=None, snapshots=MemorySnapshots())
+    reg = regmod.Registry(cache=cache)
+    a, b = _prov("a")(), _prov("b")()
+    b.cacheable = False
+    reg.register(a)
+    reg.register(b)
+    assert isinstance(reg.get("a"), CachedProvider) and reg.get("a").name == "a"
+    assert reg.get("b") is b
+
+
+def test_no_cache_never_wraps():
+    reg = regmod.Registry()
+    p = _prov("a")()
+    reg.register(p)
+    assert reg.get("a") is p
+
+
+def test_shadowing_error_with_wrapped_existing(monkeypatch):
+    from lse_terminal.engine.cache import CandleCache
+    from lse_terminal.engine.cache_store import MemorySnapshots
+    reg = regmod.Registry(cache=CandleCache(store=None, snapshots=MemorySnapshots()))
+    reg.register(_prov("x")())
+    _eps(monkeypatch, "x")
+    regmod.load_plugins(reg)
+    assert any("replaced the existing provider 'x'" in e for e in reg.plugin_errors)
