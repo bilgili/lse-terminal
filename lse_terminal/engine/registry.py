@@ -32,10 +32,6 @@ class Registry:
     def register(self, provider: Provider) -> None:
         if not provider.name:
             raise ValueError(f"{type(provider).__name__} has an empty name")
-        if provider.name in self._providers:
-            msg = f"provider {provider.name!r} replaced an existing provider of the same name"
-            log.warning(msg)
-            self.plugin_errors.append(msg)
         self._providers[provider.name] = provider
 
     def get(self, name: str) -> Provider:
@@ -96,6 +92,14 @@ def load_plugins(reg: Registry) -> None:
                 log.warning(msg)
                 reg.plugin_errors.append(msg)
                 continue
+            # A plugin may shadow a built-in (lse, userdata) on purpose, but
+            # never silently. Checked here, not in register(): set_key,
+            # clear_key and broker reconnects replace providers legitimately.
+            if provider.name in {q.name for q in reg.all()}:
+                msg = (f"provider plugin {ep.name!r} replaced the existing "
+                       f"provider {provider.name!r}")
+                log.warning(msg)
+                reg.plugin_errors.append(msg)
             reg.register(provider)
         except Exception as e:
             msg = f"provider plugin {ep.name!r} failed to load: {e}"

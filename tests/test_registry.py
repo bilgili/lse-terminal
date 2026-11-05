@@ -60,15 +60,24 @@ def test_builtins_are_not_custom():
     assert not any(p.is_custom for p in reg.all())
 
 
-def test_register_duplicate_name_records_a_plugin_error():
+def test_plugin_shadowing_a_provider_records_a_plugin_error(monkeypatch):
     reg = regmod.Registry()
-    first, second = _prov("dup")(), _prov("dup")()
+    first = _prov("dup")()
     reg.register(first)
-    assert reg.plugin_errors == []
-    reg.register(second)
+    second = _prov("dup")()
+    _eps(monkeypatch, ("shadow", lambda: second))
+    regmod.load_plugins(reg)
     assert reg.get("dup") is second
     assert len(reg.plugin_errors) == 1
-    assert "'dup'" in reg.plugin_errors[0] and "replaced an existing provider" in reg.plugin_errors[0]
+    assert "'shadow'" in reg.plugin_errors[0] and "'dup'" in reg.plugin_errors[0]
+
+
+def test_plain_reregister_is_not_an_error():
+    # set_key / clear_key / broker reconnect replace a provider on purpose.
+    reg = regmod.Registry()
+    reg.register(_prov("lse")())
+    reg.register(_prov("lse")())
+    assert reg.plugin_errors == []
 
 
 def test_plugin_with_unsettable_is_custom_is_reported(monkeypatch):
