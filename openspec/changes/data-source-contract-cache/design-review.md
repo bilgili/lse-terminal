@@ -51,12 +51,14 @@ TLC stops at the first violation, so a failing run's state count is the part of 
 | Run | What changes from the main run | Result | Distinct states | Search depth | Time |
 |---|---|---|---|---|---|
 | `design.cfg` (main) | none: all amendments on, step 1, settle 1, clear on | PASS (I1, I2, CovBehindSource, I3) | 4,936,858 | 57 | 39 s |
-| `ok_nolock_noclear` | read after unlock (D7.6 as written), no clear | RUNS_PENDING | | | |
-| `ok_step2` | step 2, settle 1, off-grid bar, cap 1 | RUNS_PENDING | | | |
-| `ok_step2_s2` | step 2, settle 2, 9 ticks | RUNS_PENDING | | | |
-| `ok_lag_eq_settle` | lag 1 = settle 1 | RUNS_PENDING | | | |
-| `live_asis` | L1, all rules as written, 1 reader, windowed only | RUNS_PENDING | | | |
-| `live_fixed` | L1, all amendments, 1 reader, windowed only | RUNS_PENDING | | | |
+| `ok_nolock_noclear` | read after unlock (D7.6 as written), no clear | PASS (I1, I2, CovBehindSource, I3) | 13,488,044 | 60 | 1 min 21 s |
+| `ok_step2` | step 2, settle 1, off-grid bar, cap 1, 2 readers | PASS (I1, I2, CovBehindSource, I3) | 1,726,280 | 43 | 6 s |
+| `ok_step2_s2` | step 2, settle 2, 9 ticks, 2 readers | PASS (I1, I2, CovBehindSource, I3) | 1,001,034 | 40 | 3 s |
+| `ok_lag_eq_settle` | lag 1 = settle 1, 2 readers | PASS (I1, I2, CovBehindSource, I3) | 5,281,515 | 57 | 17 s |
+| `live_asis` | L1, all rules as written, 1 key, 1 reader, windowed only | PASS (L1) | 94,476 | 56 | 9 s |
+| `live_fixed` | L1, all amendments, 1 key, 1 reader, windowed only | PASS (L1) | 248 | 17 | <1 s |
+| `live2_fixed` | L1, all amendments, 1 key, 2 readers, windowed only | PASS (L1) | 844 | 18 | <1 s |
+| `live2_asis` | L1, all rules as written, 1 key, 2 readers, windowed only | not finished: stopped at 3.16M distinct states, queue still growing | – | – | >17 min |
 | `cx_tail` | D7.2 as written | **I3 violated** | 2,432 | 9 | <1 s |
 | `cx_edge` | D7.1 as written, step 2, settle 1 | **I2 violated** | 1,323 | 9 | <1 s |
 | `cx_edge_i3` | same, check I3 only | **I3 violated** | 5,055 | 11 | <1 s |
@@ -227,7 +229,7 @@ The main run passes with these six rule changes. Each `cx_*` run shows what brea
 
 **Refuted for the read alone. Confirmed for clear.**
 
-- A read outside the lock is safe while the store only grows and each fill is one bars-then-coverage transaction. `ok_nolock_noclear` runs the amended rules with the read after unlock and no clear: RUNS_PENDING_NOLOCK. A reader can see bars without coverage (bars upserted by the tail). That is harmless, because no rule infers coverage from bars (D7.5) and FixCount counts only bars inside the run. A reader can never see coverage without bars, because one transaction writes both.
+- A read outside the lock is safe while the store only grows and each fill is one bars-then-coverage transaction. `ok_nolock_noclear` runs the amended rules with the read after unlock and no clear: PASS for I1, I2, CovBehindSource and I3 over 13,488,044 distinct states. A reader can see bars without coverage (bars upserted by the tail). That is harmless, because no rule infers coverage from bars (D7.5) and FixCount counts only bars inside the run. A reader can never see coverage without bars, because one transaction writes both.
 - `clear` breaks the "only grows" condition. Without the key lock, a clear between a reader's fill and its read serves a frame with the cleared bars missing (`cx_lock`). A fill that fetched before a clear and writes after it also puts old data back. That defeats the purpose of `clear`, which is the only fix for a restated bar.
 - `lset cache clear` runs in a second process. `threading.Lock` does not reach it. Either the CLI calls `DELETE /api/cache` on the running engine, or a per-key generation number lives in SQLite and each fill writes only when the generation has not changed.
 - Three SQLite points the design must state:
@@ -241,7 +243,7 @@ The main run passes with these six rule changes. Each `cx_*` run shows what brea
 - **When `now` is sampled matters.** The model samples `t0` at lock time, before any source call. Sampling after a source call lets the wrapper call a bar closed that was partial when the source answered. D7 must say "sample `now` once, before the first source call".
 - **Calls with `end` and no `start` have no rule.** `_backtest_candles` sends that shape when a backtest has a "to" date and no "from" date (server.py:1003-1011). LSE answers "the newest N before `end`". D7.4 as written either drops `end` (wrong frame) or records coverage up to `horizon` past `end`. Add a third rule (newest N in `(-inf, min(end, edge))`, coverage `[first_ts, min(end, edge))`), or bypass the cache for this shape.
 - **"The window reaches the present" needs a definition.** Use `end is None or end > edge`. The gap computation must clip at `edge`. Otherwise `[horizon, end)` is a new gap on every call, which costs one extra source call per poll.
-- **L1 holds** for the rules as written and for the amended rules: RUNS_PENDING_LIVE. The defects above are safety defects. No rule stops coverage from growing.
+- **L1 holds** for the rules as written and for the amended rules: with one key and one reader, `live_asis` passes over 94,476 distinct states and `live_fixed` over 248. With two readers, `live2_fixed` passes over 844. The liveness configs use `Keys = {"A"}`. L1 is per key, and the safety runs show that keys do not interact. With two keys, the as-written run reached 17.5M states in 13 h, and the reviewer stopped it. The defects above are safety defects. No rule stops coverage from growing.
 
 ## 3. Architecture findings, D1 to D11
 
