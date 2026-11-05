@@ -49,6 +49,14 @@ ticket and the assistant can read them.
 [Brue](https://github.com/londonstrategicedge/brue), a small language that
 runs on a Python engine.
 
+The engine keeps a cache in `~/.config/lse-terminal/cache.sqlite`. It
+holds closed candles and the results of six snapshot methods: options
+underlyings, chain, flow, economic calendar, macro catalog and macro series.
+Set `LSE_TERMINAL_CACHE=off` to turn the file off. Run `lset cache clear
+[--provider P --symbol S --timeframe T]` to delete cached data. Run `lset
+cache stats` to see its size. A restated bar stays in the cache until you
+clear it.
+
 ## Key
 
 One free key from https://londonstrategicedge.com/data. It unlocks the data

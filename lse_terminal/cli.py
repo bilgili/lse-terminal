@@ -122,10 +122,65 @@ def _utf8_streams(sys_mod) -> None:
             pass  # not a real text stream (pythonw, a closed fd)
 
 
+def _engine_port(default: int) -> int:
+    """Port of the running engine from config_dir()/engine.json, else default."""
+    import json
+
+    from lse_terminal.engine.config import config_dir
+    try:
+        return int(json.loads((config_dir() / "engine.json").read_text())["port"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return default
+
+
+def _cache_cmd(argv: list[str]) -> int:
+    """`lset cache clear|stats`: through the running engine (it holds the
+    key locks), straight to the file only when no engine answers."""
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    ap = argparse.ArgumentParser(prog="lset cache")
+    ap.add_argument("action", choices=["clear", "stats"])
+    ap.add_argument("--provider")
+    ap.add_argument("--symbol")
+    ap.add_argument("--timeframe")
+    ap.add_argument("--port", type=int, default=7787)
+    a = ap.parse_args(argv)
+    q = urllib.parse.urlencode({k: v for k, v in (
+        ("provider", a.provider), ("symbol", a.symbol), ("timeframe", a.timeframe)) if v})
+    port = _engine_port(a.port)
+    url = f"http://127.0.0.1:{port}/api/cache" + ("/stats" if a.action == "stats" else "")
+    req = urllib.request.Request(url + (f"?{q}" if q and a.action == "clear" else ""),
+                                 method="GET" if a.action == "stats" else "DELETE")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            print(r.read().decode())
+            return 0
+    except urllib.error.HTTPError as e:      # an engine answered: never touch the file
+        print(e.read().decode(errors="replace"))
+        return 1
+    except urllib.error.URLError:
+        pass   # no engine answers: no reader can be in flight, use the file
+    from lse_terminal.engine.cache import CandleCache
+    from lse_terminal.engine.cache_store import SqliteStore
+    from lse_terminal.engine.config import config_dir
+    st = SqliteStore(config_dir() / "cache.sqlite")
+    if a.action == "stats":
+        print(json.dumps(st.stats()))
+    else:
+        print(json.dumps({"cleared": CandleCache(st, st).clear(
+            a.provider, a.symbol, a.timeframe)}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     import sys
 
     raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "cache":
+        return _cache_cmd(raw[1:])
     _utf8_streams(sys)
 
     # Optional ML libraries are installed by the user at runtime rather than
@@ -258,7 +313,26 @@ def main(argv: list[str] | None = None) -> int:
         # mac/windows and would wrongly suppress the open there).
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
     print(f"LSE Terminal -> {url}")
-    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
+    # `lset cache` finds this engine through the file (the desktop app picks
+    # a free port, not 7787). Removed on normal exit; a stale file after a
+    # crash only costs one refused connection before the file fallback.
+    import json
+    import os
+
+    from lse_terminal.engine.config import config_dir
+    info = config_dir() / "engine.json"
+    try:
+        info.parent.mkdir(parents=True, exist_ok=True)
+        info.write_text(json.dumps({"port": args.port, "pid": os.getpid()}))
+    except OSError:
+        pass
+    try:
+        uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
+    finally:
+        try:
+            info.unlink()
+        except OSError:
+            pass
     return 0
 
 
