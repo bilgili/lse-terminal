@@ -157,7 +157,11 @@ def _cache_cmd(argv: list[str]) -> int:
         req = urllib.request.Request(url + (f"?{q}" if q and a.action == "clear" else ""),
                                      method="GET" if a.action == "stats" else "DELETE")
         try:
-            with urllib.request.urlopen(req, timeout=10) as r:
+            # A clear may wait LOCK_TIMEOUT (30 s) on a busy key before it skips
+            # it; give it that much plus slack so a live engine is not reported
+            # as hung. ponytail: one busy key's worth; many busy keys can still
+            # exceed it (safe: the file is never touched on a timeout).
+            with urllib.request.urlopen(req, timeout=10 if a.action == "stats" else 45) as r:
                 return 0, r.read().decode()
         except urllib.error.HTTPError as e:      # an engine answered: never touch the file
             return 1, e.read().decode(errors="replace")

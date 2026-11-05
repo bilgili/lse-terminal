@@ -250,7 +250,7 @@ class CachedProvider:
         if len(closed):
             first = int(closed["ts"].iloc[0])
             st.write_page(key, closed, first, edge, None, now)
-            if len(df) < limit:                                              # FixHit
+            if len(raw) < limit:                                             # FixHit (raw, as H1)
                 # A short answer is the whole history, but a source may backfill
                 # later: claim "nothing older" only for HISTORY_TTL. runs() joins
                 # this empty range to [first, edge), so c0 == HISTORY hits until it
