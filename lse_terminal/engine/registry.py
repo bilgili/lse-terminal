@@ -32,6 +32,10 @@ class Registry:
     def register(self, provider: Provider) -> None:
         if not provider.name:
             raise ValueError(f"{type(provider).__name__} has an empty name")
+        if provider.name in self._providers:
+            msg = f"provider {provider.name!r} replaced an existing provider of the same name"
+            log.warning(msg)
+            self.plugin_errors.append(msg)
         self._providers[provider.name] = provider
 
     def get(self, name: str) -> Provider:
@@ -85,7 +89,13 @@ def load_plugins(reg: Registry) -> None:
             obj = ep.load()
             provider = obj() if inspect.isclass(obj) else obj
             # Installed by the user, so never hidden by the fleet directory.
-            provider.is_custom = True
+            try:
+                provider.is_custom = True
+            except (AttributeError, TypeError) as e:
+                msg = f"provider plugin {ep.name!r} failed to load: cannot set is_custom ({e})"
+                log.warning(msg)
+                reg.plugin_errors.append(msg)
+                continue
             reg.register(provider)
         except Exception as e:
             msg = f"provider plugin {ep.name!r} failed to load: {e}"

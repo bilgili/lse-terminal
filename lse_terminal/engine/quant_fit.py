@@ -37,6 +37,8 @@ import math
 import numpy as np
 import pandas as pd
 
+from lse_terminal.contracts import TIMEFRAME_SECONDS
+
 # Fitting sample cap. The GARCH/Kalman/HMM recursions are sequential, so an
 # unbounded 4M-row dataset would hang the request; the tail is also the regime
 # the user cares about. Always reported in provenance, never silent.
@@ -142,9 +144,7 @@ def _num(frame: pd.DataFrame, col: str) -> np.ndarray:
 def _tf_label(dt_seconds: float) -> str:
     if dt_seconds <= 0:
         return "irregular"
-    for secs, name in ((1, "1s"), (60, "1m"), (300, "5m"), (900, "15m"),
-                       (1800, "30m"), (3600, "1h"), (14400, "4h"),
-                       (86400, "1d"), (604800, "1w")):
+    for name, secs in TIMEFRAME_SECONDS.items():
         if abs(dt_seconds - secs) <= max(1.0, secs * 0.2):
             return name
     if dt_seconds >= 86400 * 25:

@@ -58,3 +58,31 @@ def test_builtins_are_not_custom():
     reg = regmod.Registry()
     regmod.load_builtins(reg)
     assert not any(p.is_custom for p in reg.all())
+
+
+def test_register_duplicate_name_records_a_plugin_error():
+    reg = regmod.Registry()
+    first, second = _prov("dup")(), _prov("dup")()
+    reg.register(first)
+    assert reg.plugin_errors == []
+    reg.register(second)
+    assert reg.get("dup") is second
+    assert len(reg.plugin_errors) == 1
+    assert "'dup'" in reg.plugin_errors[0] and "replaced an existing provider" in reg.plugin_errors[0]
+
+
+def test_plugin_with_unsettable_is_custom_is_reported(monkeypatch):
+    class Slotted(_prov("slot")):
+        __slots__ = ()
+
+        @property
+        def is_custom(self):
+            return False
+
+    _eps(monkeypatch, ("slot", lambda: Slotted))
+    reg = regmod.Registry()
+    regmod.load_plugins(reg)
+    assert reg.all() == []
+    assert len(reg.plugin_errors) == 1
+    assert "'slot'" in reg.plugin_errors[0]
+    assert "cannot set is_custom" in reg.plugin_errors[0]

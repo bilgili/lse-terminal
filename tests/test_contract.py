@@ -405,3 +405,35 @@ def test_unexpected_harness_error_is_reported_not_raised(monkeypatch):
         raise KeyError("oops")
     monkeypatch.setattr(t, "_check_capabilities", boom)
     assert any("harness error" in p for p in check_provider(DemoProvider()))
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("20240630", 1719705600),
+    ("-20240630", -20240630),
+    ("1719705600", 1719705600),
+    ("2024063", 2024063),
+])
+def test_to_epoch_eight_digit_string_is_a_utc_date(value, expected):
+    assert to_epoch(value) == expected
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, None),
+    ("", None),
+    (1719705600, "2024-06-30T00:00:00"),
+    ("1719705600", "2024-06-30T00:00:00"),
+    ("2024-06-30", "2024-06-30T00:00:00"),
+    ("2024-06-30T12:00:00+00:00", "2024-06-30T12:00:00"),
+    ("2024-06-30T12:00:00Z", "2024-06-30T12:00:00"),
+    ("20240630", "2024-06-30T00:00:00"),
+    ("garbage", "garbage"),
+])
+def test_gate_ts_shapes(value, expected):
+    assert LseProvider._gate_ts(value) == expected
+
+
+def test_tf_label_thirty_seconds():
+    from lse_terminal.engine.quant_fit import _tf_label
+    assert _tf_label(30.0) == "30s"
+    assert _tf_label(60.0) == "1m"
+    assert _tf_label(86400.0) == "1d"

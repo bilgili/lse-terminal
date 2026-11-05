@@ -28,8 +28,10 @@ def to_epoch(bound: int | float | str | None) -> int | None:
 
     Accepts an int/float, None, or a string. A string is an ASCII digit
     string (optional leading "-"), a date-only string, or what
-    datetime.isoformat() emits, plus a "Z" suffix. Float strings are not
-    accepted. A naive value is UTC. Empty or whitespace-only is None.
+    datetime.isoformat() emits, plus a "Z" suffix. Exactly 8 ASCII digits
+    are a YYYYMMDD UTC date, not epoch seconds (strptime, so this does not
+    depend on the Python version); any other digit string is epoch seconds.
+    Float strings are not accepted. A naive value is UTC. Empty or whitespace-only is None.
     """
     if isinstance(bound, bool):
         raise TypeError("bound must not be bool")
@@ -40,6 +42,8 @@ def to_epoch(bound: int | float | str | None) -> int | None:
     s = str(bound).strip()
     if not s:
         return None
+    if len(s) == 8 and s.isascii() and s.isdigit():
+        return int(datetime.strptime(s, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp())
     d = s.lstrip("-")
     if d.isascii() and d.isdigit():
         return int(s)

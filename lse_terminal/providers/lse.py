@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from lse_terminal.contracts import CANDLE_COLUMNS, Instrument, Provider
+from lse_terminal.contracts import CANDLE_COLUMNS, Instrument, Provider, to_epoch
 from lse_terminal.engine.config import get_lse_api_key
 from lse_terminal.providers.spread import QuoteSynthesizer
 
@@ -227,21 +227,13 @@ class LseProvider(Provider):
         tz-aware ISO strings both become naive UTC here; a value already in
         gate shape passes through untouched.
         """
-        if value is None or value == "":
-            return None
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(float(value), timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-        s = str(value).strip()
         try:
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            ts = to_epoch(value)
         except ValueError:
-            try:
-                return datetime.fromtimestamp(float(s), timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-            except ValueError:
-                return s  # not ours to judge; the gate's own error surfaces
-        if dt.tzinfo is not None:
-            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+            return str(value).strip()  # not ours to judge; the gate's own error surfaces
+        if ts is None:
+            return None
+        return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
     @staticmethod
     def _candle_frame(rows) -> pd.DataFrame:
