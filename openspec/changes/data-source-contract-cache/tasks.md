@@ -28,15 +28,15 @@
 
 ## 3. Cache (PR 3, behind `LSE_TERMINAL_CACHE`)
 
-- [ ] 3.1 `engine/cache.py`: `SqliteStore` with the three tables, per-thread connections, `busy_timeout`, the `SqliteStore` interface (`read`, `coverage`, `write_page`, `clear`, `keys`, snapshot methods, `stats`) with `empty_until`, `MemorySnapshots`, `snapshot_get`/`snapshot_put` with pruning and `jsonable_encoder`.
-- [ ] 3.2 `CandleCache`: store, per-key locks, hosted flag, `clear(key)` and global clear under locks.
-- [ ] 3.3 `CachedProvider` as a plain class with `__getattr__`: rules D7.1 to D7.8 (bypass, bounds, windowed fill with `last_ts + 1` paging, limit-only with the tail from the newest run and a hit on run plus tail (R1), empty coverage, windowed tail from `edge`, read under lock, lock timeout, fail open on `sqlite3.Error`), sign-out pass-through, six snapshot methods (no `logos`) with TTL override and canonical keys.
-- [ ] 3.4 `Registry(cache=...)`; `register` wraps when `cacheable`, in every mode; `store` is `None` when hosted or the switch is `off`. `create_app` builds the `CandleCache`.
-- [ ] 3.5 Routes `DELETE /api/cache` and `GET /api/cache/stats`, local mode only. CLI `lset cache clear|stats` through the engine found by `config_dir()/engine.json` (fallback `--port`), direct file only when no engine answers.
-- [ ] 3.6 Tests `tests/test_cache.py`, fake source with a clock and a call counter. The ten listed cases: repeat window, no partial bar, gap fill, holiday coverage, truncation, limit-only, same-key lock, cross-key no wait, clear, bypass and off switch. Plus one test per model counter-example: `cx_tail`, `cx_edge`, `cx_trunc`, `cx_count`, `cx_lock`, `cx_irr`, `cx_transient`, `cx_skip`, `cx_lag`, `cx_restate`. Plus wrapper transparency, lock survives re-registration, sign-out pass-through, end-only bypass, empty coverage heals, snapshot canonical key and provider override.
-- [ ] 3.7 README: one paragraph on the cache file, the switch, and `lset cache clear`.
+- [x] 3.1 `engine/cache.py`: `SqliteStore` with the three tables, per-thread connections, `busy_timeout`, the `SqliteStore` interface (`read`, `coverage`, `write_page`, `clear`, `keys`, snapshot methods, `stats`) with `empty_until`, `MemorySnapshots`, `snapshot_get`/`snapshot_put` with pruning and `jsonable_encoder`.
+- [x] 3.2 `CandleCache`: store, per-key locks, hosted flag, `clear(key)` and global clear under locks.
+- [x] 3.3 `CachedProvider` as a plain class with `__getattr__`: rules D7.1 to D7.8 (bypass, bounds, windowed fill with `last_ts + 1` paging, limit-only with the tail from the newest run and a hit on run plus tail (R1), empty coverage, windowed tail from `edge`, read under lock, lock timeout, fail open on `sqlite3.Error`), sign-out pass-through, six snapshot methods (no `logos`) with TTL override and canonical keys.
+- [x] 3.4 `Registry(cache=...)`; `register` wraps when `cacheable`, in every mode; `store` is `None` when hosted or the switch is `off`. `create_app` builds the `CandleCache`.
+- [x] 3.5 Routes `DELETE /api/cache` and `GET /api/cache/stats`, local mode only. CLI `lset cache clear|stats` through the engine found by `config_dir()/engine.json` (fallback `--port`), direct file only when no engine answers.
+- [x] 3.6 Tests `tests/test_cache.py`, fake source with a clock and a call counter. The ten listed cases: repeat window, no partial bar, gap fill, holiday coverage, truncation, limit-only, same-key lock, cross-key no wait, clear, bypass and off switch. Plus one test per model counter-example: `cx_tail`, `cx_edge`, `cx_trunc`, `cx_count`, `cx_lock`, `cx_irr`, `cx_transient`, `cx_skip`, `cx_lag`, `cx_restate`. Plus wrapper transparency, lock survives re-registration, sign-out pass-through, end-only bypass, empty coverage heals, snapshot canonical key and provider override.
+- [x] 3.7 README: one paragraph on the cache file, the switch, and `lset cache clear`.
 - [x] 3.8 Review gate: run `tlc design.tla -config design.cfg` and every `design.cx_*.cfg` whenever D7 changes; the `cx_*` runs must still fail.
-- [ ] 3.9 Delete the PR 2 route snapshot helper when the wrapper snapshot cache lands. The wrapper owns the snapshot TTL in every mode: `SqliteStore` when the cache is on, `MemorySnapshots` when hosted or `LSE_TERMINAL_CACHE=off`.
+- [x] 3.9 Delete the PR 2 route snapshot helper when the wrapper snapshot cache lands. The wrapper owns the snapshot TTL in every mode: `SqliteStore` when the cache is on, `MemorySnapshots` when hosted or `LSE_TERMINAL_CACHE=off`.
 
 ## 4. moomoo plugin (separate repository `lse-terminal-moomoo`)
 
