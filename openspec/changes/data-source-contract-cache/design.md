@@ -194,7 +194,9 @@ Contract items the plugin must honour for the cache:
 - Cache the TCP probe so `configured()` does no I/O; refresh it from a background thread every 30 s.
 - `settle_seconds` set from observed publication delay, default 60.
 
-Time: kline `time_key` is a naive string in the exchange's local zone. The plugin maps market to zone with `zoneinfo` and converts to epoch UTC. **Verify before code:** whether an intraday `time_key` marks bar open or bar close. One test pins the answer.
+Time: kline `time_key` is a naive string in the exchange's local zone. The plugin maps market to zone with `zoneinfo` and converts to epoch UTC.
+
+**Verified 2026-11-06** on moomoo's hosted kline service, which shares the OpenD backend. An intraday `time_key` marks the bar close: US 60m keys run 10:30 to 15:30, then 16:00; HK 30m keys start at 10:00 and resume at 13:30 after lunch. A daily `time_key` is the trading date at local midnight. The plugin stamps an intraday bar `ts = close - step` and a daily or weekly bar at the date 00:00 UTC. A short bar, such as the 15:30 to 16:00 US bar on 60m, gets a stamp earlier than its true open. Discarded: `max(close - step, previous close)`. It gives the true open, but the answer depends on where a page starts, and I3 needs one answer per bar. The plugin's live test confirms the rule on OpenD.
 
 Adjustment: `AuType.NONE`. The cache invariant I2 needs closed bars to stay immutable. Adjusted bars change on every split.
 
