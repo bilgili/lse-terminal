@@ -7,7 +7,7 @@ and stream are the source's own. The registry owns one CandleCache that
 holds the stores, the per-key locks and the clock; every wrapper shares
 it, so a re-registered provider (set_key) keeps its locks.
 
-Fill rules are D7, checked by openspec/changes/data-source-contract-cache/
+Fill rules are D7, checked by openspec/changes/archive/2026-11-06-data-source-contract-cache/
 design.tla (flags FixEdge, FixTail, FixTrunc, FixCount, FixLock, PlanWin,
 PlanMissAsIs, TailFromRun, FixHit). Change them only with the model.
 

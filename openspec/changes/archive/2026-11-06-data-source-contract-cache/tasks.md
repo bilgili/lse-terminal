@@ -40,7 +40,7 @@
 
 ## 4. moomoo plugin (separate repository `lse-terminal-moomoo`)
 
-- [ ] 4.1 Verify against a live OpenD: intraday `time_key` marks bar open or bar close. Record the answer in the plugin README and pin it with a test. Open: the hosted service confirms bar close; the plugin's live test (`tests/test_live.py`) waits for a running OpenD.
+- [x] 4.1 Verify against a live OpenD: intraday `time_key` marks bar open or bar close. Record the answer in the plugin README and pin it with a test. Done 2026-11-06: the homelab OpenD (encrypted) gives US 60m keys 10:30 to 15:30 and 16:00, so the key is the bar close; the plugin live suite passed (13 tests).
 - [x] 4.2 Package skeleton: `pyproject.toml` with the entry point, deps `lse-terminal`, `moomoo-api`.
 - [x] 4.3 `MoomooProvider`: config, `configured()` from a cached TCP probe refreshed by a background thread, quota text, lazy context with lock and rebuild, `settle_seconds`.
 - [x] 4.4 `search` with watchlist groups and market catalogs, 1 h in-memory TTL, prefix then substring ranking.
@@ -54,7 +54,7 @@
 
 - [x] 5.1 `openspec validate data-source-contract-cache` clean.
 - [x] 5.2 Claude review subagent over `git diff main...` per PR, Opus for PR 1 to 3, findings folded.
-- [ ] 5.3 `openspec archive data-source-contract-cache` after PR 3 merges.
+- [x] 5.3 `openspec archive data-source-contract-cache` after PR 3 merges.
 
 ## 6. Follow-ups after PR 4
 
