@@ -52,8 +52,8 @@
 
 ## 5. Close
 
-- [ ] 5.1 `openspec validate data-source-contract-cache` clean.
-- [ ] 5.2 Claude review subagent over `git diff main...` per PR, Opus for PR 1 to 3, findings folded.
+- [x] 5.1 `openspec validate data-source-contract-cache` clean.
+- [x] 5.2 Claude review subagent over `git diff main...` per PR, Opus for PR 1 to 3, findings folded.
 - [ ] 5.3 `openspec archive data-source-contract-cache` after PR 3 merges.
 
 ## 6. Follow-ups after PR 4
