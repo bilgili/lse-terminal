@@ -31,6 +31,9 @@ _SETUP_HINT = {
     "options": "LSE API key not set. Add your free key under MARKETS to load options data.",
     "flow": "LSE API key not set. Add your free key under MARKETS to load options data.",
     "screener": _NEEDS_KEY,
+    "search": _NEEDS_KEY,
+    "candles": _NEEDS_KEY,
+    "stream": _NEEDS_KEY,
 }
 
 # Catalog datasets the /candles endpoint serves. Options and economics exist

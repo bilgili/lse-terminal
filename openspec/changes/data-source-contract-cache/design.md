@@ -68,15 +68,64 @@ The resolver replaces `_lse_for_options`, `_lse_for_macro` and every `reg.get("l
 
 **Route snapshot cache in PR 2.** The four route caches (`econ_cache`, `macro_cat_cache`, `macro_series_cache`, `opt_cache`) merge into one TTL helper. The key is the resolved provider name, a route tag and the canonical arguments; it never uses the raw `provider` query parameter. The resolver, with its `configured()` check, runs before the cache lookup, so after sign-out no cached row is served. Each route tag keeps its own bound (calendar 64, catalog 8, series 256, options 64). The catalog bound is 8, not today's 1, because the key now holds the provider name and two sources must not evict each other on every call. The TTL values do not change. PR 3 replaces the helper with the wrapper snapshot cache (D8). The wrapper owns the TTL in every mode, hosted and off included, because today both modes have the route caches (D5). Discarded: delete the route caches in PR 2. Between PR 2 and PR 3 every options poll and calendar filter change would then reach the network.
 
-**Symbol routes `/api/instruments` and `/api/candles`, amended after PR 4.** These two routes always name `provider`. They called `reg.get(provider)` directly and skipped the `configured()` check. An unconfigured moomoo answered 502 `candles failed: moomoo OpenD ... is not available`, not 409. Both routes now resolve through `_source("search", provider)` and `_source("candles", provider)`. The rules of the explicit path apply: 404 for an unknown provider, 409 with `setup_hint(cap)` for an unconfigured one. LSE without a key already failed on both routes, because the catalog and the candles need the key. Its answer changes from 502 to 409 with the default hint `lse is not configured`. `app.js` shows the detail text and does not branch on 502 for these routes. Discarded: a per-capability `needs_config(cap)` method on the contract. No built-in source serves these two capabilities without configuration, so the method has no user.
+**Symbol routes `/api/instruments` and `/api/candles`, amended after PR 4.** These two routes always name `provider`. They called `reg.get(provider)` directly and skipped the `configured()` check. An unconfigured moomoo answered 502 `candles failed: moomoo OpenD ... is not available`, not 409. Both routes now resolve through `_source("search", provider, response=response)` and `_source("candles", provider, response=response)`. The rules of the explicit path apply: 404 for an unknown provider, 409 with `setup_hint(cap)` for an unconfigured one. A successful answer carries `X-Source`, as on every capability route.
+
+Each route calls `_source` before its `try`. The `try` keeps `ValueError` → 404 and other errors → 502 for the provider call only. FastAPI's `HTTPException` is an `Exception`, so a `_source` call inside the `try` changes the 409 into a 502.
+
+Three more routes load candles for a named provider: `/api/user-indicators/preview`, `/api/backtest` and the quant modes (`/api/backtest/montecarlo`, `/api/backtest/walkforward`). They call `_source("candles", body.provider)` before their `try` and keep their other error answers. The ML trainer accepts only `userdata`, so it calls `reg.get("userdata")`. An AST (abstract syntax tree) gate in `tests/test_routing.py` keeps the rule: in `server.py`, a `reg.get` call with an argument that is not a constant occurs only inside `_source`. `/api/ws` follows the same rule (D12).
+
+LSE without a key already failed on both symbol routes, because the catalog and the candles need the key. Its answer changes from 502 to 409. `LseProvider.setup_hint` returns `_NEEDS_KEY` for `search`, `candles` and `stream`, so the UI keeps the instruction to get a key. `app.js` shows the detail text and does not branch on 502 for these routes.
+
+Discarded: a per-capability `needs_config(cap)` method on the contract. No built-in source serves `search`, `candles` or `stream` without configuration, so the method has no user. Discarded: the check in `Registry.get`. The registry has no HTTP status, and `set_key`, `clear_key` and the broker sync need plain lookups. Discarded: a typed error in each provider. Each plugin then repeats the rule.
 
 ### D12. Stream websocket lifecycle
 
-`/api/ws` drives `Provider.stream()` for one browser tab. Before this change, the handler noticed a closed tab only when a send failed. Outside market hours no tick arrives, so a closed tab kept the source's stream open for a long time. For moomoo this held an OpenD connection and part of the subscription quota (100 per account).
+`/api/ws` drives `Provider.stream()` for one browser tab. Before this change, the handler noticed a closed tab only when a send failed. Outside market hours no tick arrives, so a closed tab kept the source's stream open for a long time. For moomoo this held an OpenD connection and part of the subscription quota (100 per account). `connectStream` in `app.js` closes the old socket on every symbol switch, so a client disconnect is a frequent event.
 
-The handler now runs two tasks. The pump task forwards stream items to the socket, with today's error handling. The watch task reads the socket until it receives `websocket.disconnect`, and ignores other client messages. The handler waits for the first task that ends and cancels the other. The `finally` block calls `agen.aclose()`, so the provider's own `finally` releases its resources. A cancel during `agen.__anext__()` raises `CancelledError` inside the generator. The generator runs its `finally` and ends, and `aclose()` on an ended generator does nothing.
+**Resolution.** After `accept()`, the handler resolves the source with `_source("stream", provider)`. On `HTTPException` it sends `{"type": "error", "message": detail}` and closes the socket, as for `NotSupported` before. The socket has no response headers after the handshake, so `X-Source` does not apply. `UNSUPPORTED["stream"]` is `does not stream`. The default `stream()` and the 404 of the resolver use that text. The filter in `connectStream` matches `does not stream` and stays quiet, so a MY DATA chart shows no stream error.
 
-No TLA+ model: two tasks, first to end cancels the other, and no shared state except the generator, which one task owns.
+No built-in source streams without configuration. A keyless `LseProvider.stream()` builds `LSE(api_key=None)`, and the `lse` client raises `ValueError` "No API key". `LseProvider` and the client read the same `LSE_API_KEY` variable. The 409 hint therefore replaces an error item that the handler sent before. The handler uses `need_key=True`.
+
+**Tasks.** The handler runs two tasks. The pump task forwards stream items to the socket, with the error handling of the old handler. The watch task calls `websocket.receive()` and compares `message["type"]`. It stops at the first `websocket.disconnect` and ignores other client messages. It does not use `receive_text()` or `receive_json()`, because both raise on disconnect. Starlette also raises on a `receive()` after the disconnect message.
+
+The handler waits with `asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)`. Its `finally` block runs this order:
+
+```python
+tasks = [asyncio.create_task(pump()), asyncio.create_task(watch())]
+try:
+    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+finally:
+    for t in tasks:
+        t.cancel()
+    await asyncio.wait(tasks)
+    for t in tasks:
+        if not t.cancelled():
+            t.exception()
+    await agen.aclose()
+```
+
+`task.cancel()` only requests a cancel. The pump receives `CancelledError` at its next resume, inside `agen.__anext__()`. The generator runs its `finally` and ends. The second `asyncio.wait` waits until the pump has left the generator. After that wait, `aclose()` finds an ended generator or a generator at a yield. An `aclose()` call before the wait meets a running generator and raises `RuntimeError: aclose(): asynchronous generator is already running`.
+
+The `finally` also runs when the server cancels the handler, so no task runs after the handler returns. The loop after the wait reads the exception of each task that did not cancel, so asyncio logs no "exception was never retrieved". An unexpected error in the watch task therefore does not escape. The pump sends its own errors in-band.
+
+The handler uses `asyncio.wait(tasks)`, not `asyncio.gather(*tasks, return_exceptions=True)` as design-review.md F1 proposed. Both wait for both tasks and raise no task error. They differ when a cancel reaches the handler during the wait. `gather` then raises a new `CancelledError` without the message of the cancel. anyio (the Starlette test client, a cancel scope) identifies its own cancel by that message, so the cancel escapes the scope. `asyncio.wait` passes on the original `CancelledError`. The model step "await both tasks" is the same for both calls.
+
+The handler uses `asyncio.wait`, not `asyncio.TaskGroup`, because `pyproject.toml` allows Python 3.10 and `TaskGroup` needs Python 3.11.
+
+A provider stream must not catch `CancelledError` and continue. The wait then does not end. The `stream()` docstring states this rule.
+
+**TLA+ model.** `design_ws.tla` models one handler, one pump task, one watch task, one generator and one tab (design-review.md section 6.3). One step is one asyncio await point. A cancel request is a flag that the task sees at its next resume. The provider's `finally` awaits, so it is a separate step. Ticks, error items, the stream end, the tab close and the server cancel are not fair. All task and handler actions are weakly fair. The mode `fixed` is the order above. The mode `as_written` is the first D12 text (`aclose()` directly after `cancel()`, with no wait for the tasks). The mode `old` is the handler before this change.
+
+Properties: `NoAlreadyRunning`, `ReleasedOnReturn`, `NoOrphanTask` (invariants), `DisconnectReleases` and `PumpEndReleases` (liveness). TLC 2.19, `-workers 1`:
+
+| Config | Mode | Result | Distinct states |
+|---|---|---|---|
+| `design_ws.cfg` | fixed, shutdown on | PASS (all five) | 83 |
+| `design_ws_as_written.cfg` | as written | `NoAlreadyRunning` violated | 38 |
+| `design_ws_as_written_shutdown.cfg` | as written, shutdown on | `NoOrphanTask` violated | 17 |
+| `design_ws_old.cfg` | old | `DisconnectReleases` violated | 34 |
+
+The model does not cover a second server cancel during the wait, a stream that catches `CancelledError`, or a cancel in the middle of a frame send.
 
 ### D3. Shared timeframe table and bound parser
 

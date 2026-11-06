@@ -58,5 +58,6 @@
 
 ## 6. Follow-ups after PR 4
 
-- [ ] 6.1 `/api/instruments` and `/api/candles` resolve through `_source` (409 for an unconfigured source). Update the tests that expect 502 for a keyless LSE.
-- [ ] 6.2 `/api/ws` runs a pump task and a watch task; the first task that ends cancels the other (D12). Test: a silent stream ends when the client disconnects.
+- [x] 6.1 `/api/instruments` and `/api/candles` resolve through `_source(..., response=response)` before their `try` (D2, F2, F9). `LseProvider.setup_hint` returns `_NEEDS_KEY` for `search`, `candles` and `stream` (F6). Update the two stale "502" comments in `app.js` (F9). Add tests (F7): 409 for an unconfigured stub on both routes with no provider call, 404 for an unknown provider on both routes, 409 with the `_NEEDS_KEY` text for a keyless LSE.
+- [x] 6.2 `/api/ws` runs a pump task and a watch task (D12, F1, F8). The watch task reads `websocket.receive()` until `websocket.disconnect`. The `finally` cancels both tasks, awaits both with `asyncio.wait(tasks)` (not `gather`, see D12), then calls `agen.aclose()`. Tests (F5): a silent stream ends when the client disconnects (assert inside the test-client block); a symbol switch does not raise "already running".
+- [x] 6.3 The preview, backtest and quant routes resolve through `_source("candles", ...)` before their `try` (F3). `/api/ws` resolves through `_source("stream", ...)` and sends the detail as an error message (F4). Add `UNSUPPORTED["stream"]`. Add an AST gate: in `server.py`, a `reg.get` call with an argument that is not a constant occurs only inside `_source`. Tests: 409 for an unconfigured stub on the four routes and on `/api/ws`.

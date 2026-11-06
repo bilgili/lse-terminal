@@ -2215,7 +2215,7 @@ async function loadInstruments(query = "") {
   // looked exactly like a broken app. Search-as-you-type keeps its single
   // shot (the user is still typing); only the catalog retries.
   // No retry when the answer is a foregone conclusion: with no key saved the
-  // LSE catalog 502s ("needs an API key") every time, so retrying it just adds
+  // LSE catalog 409s ("needs an API key") every time, so retrying it just adds
   // 1.2s of backoff to every keyless launch.
   const hopeless = state.provider === "lse" && !state.lseConfigured;
   const tries = (query || hopeless) ? 1 : 3;
@@ -11683,7 +11683,7 @@ function setupLseConnect() {
       state.providers = await fetch("/api/providers").then((x) => x.json());
       $("lse-key").value = "";
       // Load the catalog BEFORE showing the tab. state.provider is already
-      // "lse" by now (boot switched to it, and its catalog call 502'd because
+      // "lse" by now (boot switched to it, and its catalog call 409'd because
       // there was no key yet), so the rail handler takes its "already on a
       // live source" branch and only re-renders the watchlist: it would paint
       // the empty list from that failed boot load and stop. The user then sat

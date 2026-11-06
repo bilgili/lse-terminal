@@ -3,7 +3,9 @@ source, explicit provider never falls back, X-Source on every answer,
 per-provider route snapshot cache."""
 
 import ast
+import asyncio
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,16 +54,23 @@ class FullStubProvider(Provider):
         return self.on
 
     def search(self, query="", limit=50):
-        return []
+        return self._hit("search", [])
 
     def candles(self, symbol, timeframe, limit=500, start=None, end=None):
-        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+        return self._hit("candles", pd.DataFrame(
+            columns=["ts", "open", "high", "low", "close", "volume"]))
 
     def quote(self, symbol):
         return self._hit("quote", None)
 
-    async def stream(self, symbols):
+    async def _one_item(self, symbols):
         yield {}
+
+    stream_gen = _one_item
+
+    def stream(self, symbols):
+        self._hit("stream", None)
+        return self.stream_gen(symbols)
 
     def prices(self, symbols):
         return self._hit("prices", [FIX["prices"]])
@@ -419,3 +428,138 @@ def test_cache_clear_returns_dict_as_is(client, monkeypatch):
     out = {"cleared": 2, "skipped": [["lse", "AAPL", "1m"]]}
     monkeypatch.setattr(client.app.state.cache, "clear", lambda *a, **k: out)
     assert client.delete("/api/cache").json() == out
+
+
+# ── Symbol routes and the stream socket resolve through _source (D2, D12) ──
+
+SYMBOL_ROUTES = [("/api/instruments", {"query": ""}), ("/api/candles", {"symbol": "X"})]
+SYM_IDS = [r[0] for r in SYMBOL_ROUTES]
+
+
+@pytest.mark.parametrize("path,params", SYMBOL_ROUTES, ids=SYM_IDS)
+def test_symbol_route_unconfigured_stub_is_409(client, stub, path, params):
+    stub.on = False
+    r = client.get(path, params={**params, "provider": "stub"})
+    assert r.status_code == 409
+    assert r.json()["detail"] == "stub is not configured"
+    assert stub.total() == 0
+
+
+@pytest.mark.parametrize("path,params", SYMBOL_ROUTES, ids=SYM_IDS)
+def test_symbol_route_unknown_provider_is_404(client, path, params):
+    assert client.get(path, params={**params, "provider": "nope"}).status_code == 404
+
+
+@pytest.mark.parametrize("path,params", SYMBOL_ROUTES, ids=SYM_IDS)
+def test_symbol_route_keyless_lse_is_409_with_key_text(client, path, params):
+    r = client.get(path, params={**params, "provider": "lse"})
+    assert r.status_code == 409
+    assert r.json()["detail"] == SCR
+
+
+@pytest.mark.parametrize("path,params", SYMBOL_ROUTES, ids=SYM_IDS)
+def test_symbol_route_configured_stub_carries_x_source(client, stub, path, params):
+    r = client.get(path, params={**params, "provider": "stub"})
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Source"] == "stub"
+
+
+BODY_ROUTES = [
+    ("/api/user-indicators/preview", {"source": "", "symbol": "X"}),
+    ("/api/backtest", {"symbol": "X", "script": ""}),
+    ("/api/backtest/montecarlo", {"symbol": "X", "script": ""}),
+    ("/api/backtest/walkforward", {"symbol": "X", "script": "", "params": {"n": "1"}}),
+]
+BODY_IDS = [r[0] for r in BODY_ROUTES]
+
+
+@pytest.mark.parametrize("path,body", BODY_ROUTES, ids=BODY_IDS)
+def test_candle_body_route_unconfigured_stub_is_409(client, stub, path, body):
+    stub.on = False
+    r = client.post(path, json={**body, "provider": "stub"})
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == "stub is not configured"
+    assert stub.total() == 0
+
+
+@pytest.mark.parametrize("path,body", BODY_ROUTES, ids=BODY_IDS)
+def test_candle_body_route_unknown_provider_is_404(client, path, body):
+    assert client.post(path, json={**body, "provider": "nope"}).status_code == 404
+
+
+def test_ast_gate_dynamic_reg_get_only_in_source():
+    """A reg.get with a non-constant argument skips the configuration
+    check; only the resolver may make one (review F3)."""
+    tree = ast.parse((ROOT / "lse_terminal/engine/server.py").read_text())
+    bad = []
+
+    def visit(node, fn):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fn = node.name
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get" and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "reg"
+                and not (node.args and isinstance(node.args[0], ast.Constant))
+                and fn != "_source"):
+            bad.append((node.lineno, fn))
+        for c in ast.iter_child_nodes(node):
+            visit(c, fn)
+
+    visit(tree, None)
+    assert bad == []
+
+
+WS_HDR = {"host": "127.0.0.1"}
+
+
+def test_ws_unconfigured_stub_gets_error_and_no_stream(client, stub):
+    stub.on = False
+    with client.websocket_connect("/api/ws?provider=stub&symbols=X", headers=WS_HDR) as ws:
+        msg = ws.receive_json()
+    assert msg == {"type": "error", "message": "stub is not configured"}
+    assert stub.total() == 0
+
+
+def test_ws_source_without_stream_says_does_not_stream(client):
+    with client.websocket_connect("/api/ws?provider=userdata&symbols=X", headers=WS_HDR) as ws:
+        msg = ws.receive_json()
+    assert msg["type"] == "error" and "does not stream" in msg["message"]
+
+
+def _silent(released: threading.Event):
+    async def gen(symbols):
+        try:
+            await asyncio.Event().wait()  # no tick ever arrives
+            yield {}
+        finally:
+            await asyncio.sleep(0)  # the moomoo finally awaits too
+            released.set()
+    return gen
+
+
+def test_ws_silent_stream_ends_when_client_disconnects(client, stub):
+    released = threading.Event()
+    stub.stream_gen = _silent(released)
+    with client.websocket_connect("/api/ws?provider=stub&symbols=X", headers=WS_HDR) as ws:
+        ws.send_text("not json")  # the watch task ignores client messages
+        ws.close()
+        # Inside the block: leaving it cancels the handler, which would hide
+        # a handler that never notices the disconnect (review F5).
+        assert released.wait(5)
+
+
+def test_ws_symbol_switch_closes_old_stream_and_new_one_streams(client, stub):
+    released = threading.Event()
+    stub.stream_gen = _silent(released)
+    with client.websocket_connect("/api/ws?provider=stub&symbols=X", headers=WS_HDR) as ws:
+        ws.close()
+        assert released.wait(5)
+
+    async def ticks(symbols):
+        yield {"symbol": symbols[0], "price": 1.0}
+        await asyncio.Event().wait()
+
+    stub.stream_gen = ticks
+    with client.websocket_connect("/api/ws?provider=stub&symbols=Y", headers=WS_HDR) as ws:
+        msg = ws.receive_json()
+    assert msg == {"symbol": "Y", "price": 1.0, "type": "tick"}

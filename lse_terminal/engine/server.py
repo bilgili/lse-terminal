@@ -695,12 +695,15 @@ def create_app() -> FastAPI:
                 "providers": d.get("providers", [])}
 
     @app.get("/api/instruments")
-    def instruments(provider: str, query: str = "", limit: int = 50):
+    def instruments(response: Response, provider: str, query: str = "", limit: int = 50):
+        # Outside the try: its `except Exception` would turn the 404/409
+        # HTTPException into a 502 (design D2).
+        p = _source("search", provider, response=response)
         try:
             # 5000 covers the whole chartable LSE catalog (~4.2k instruments)
             # so the sidebar's collapsed folders can show every group; search
             # queries still ask for 30.
-            items = reg.get(provider).search(query, limit=min(int(limit), 5000))
+            items = p.search(query, limit=min(int(limit), 5000))
         except ValueError as e:
             raise HTTPException(404, str(e))
         except Exception as e:
@@ -816,11 +819,11 @@ def create_app() -> FastAPI:
             return {}
 
     @app.get("/api/candles")
-    def candles(provider: str, symbol: str, timeframe: str = "1h",
+    def candles(response: Response, provider: str, symbol: str, timeframe: str = "1h",
                 limit: int = 5000, indicators: str = "",
                 start: str | None = None, end: str | None = None):
+        p = _source("candles", provider, response=response)  # before the try (D2)
         try:
-            p = reg.get(provider)
             # start/end are ISO timestamps. Every provider's candles() already
             # takes them (the manual-backtest replay needs "history up to the
             # session start" and windowed scrollback, not just "latest N").
@@ -899,8 +902,8 @@ def create_app() -> FastAPI:
         exceptional one, and the editor shows it inline while keeping the
         last good drawing on screen."""
         deny_hosted()
+        p = _source("candles", body.provider)  # before the try (D2)
         try:
-            p = reg.get(body.provider)
             df = p.candles(body.symbol, body.timeframe,
                            limit=max(50, min(int(body.limit), 1000)))
         except ValueError as e:
@@ -1072,9 +1075,9 @@ def create_app() -> FastAPI:
         from lse_terminal.backtest.contract import BacktestError
         try:
             engine = reg.engine(body.engine)
-            provider = reg.get(body.provider)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        provider = _source("candles", body.provider)
         try:
             candles = _backtest_candles(provider, body)
         except Exception as e:
@@ -1092,9 +1095,9 @@ def create_app() -> FastAPI:
         from lse_terminal.backtest.contract import BacktestError
         try:
             engine = reg.engine(body.engine)
-            provider = reg.get(body.provider)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        provider = _source("candles", body.provider)
         fn = getattr(engine, method, None)
         if fn is None:
             raise HTTPException(400, f"engine {body.engine} does not support {method}")
@@ -4475,7 +4478,7 @@ def create_app() -> FastAPI:
                                      "computer; import it in the MY DATA tab "
                                      "first")
         try:
-            p = reg.get(body.provider)
+            p = reg.get("userdata")  # the guard above admits only userdata
             df = p.candles(body.symbol, body.timeframe,
                            limit=max(200, min(int(body.limit), 100_000)),
                            start=body.start or None, end=body.end or None)
@@ -7072,28 +7075,56 @@ def create_app() -> FastAPI:
         await websocket.accept()
         wanted = [s for s in symbols.split(",") if s.strip()]
         try:
-            p = reg.get(provider)
-            agen = p.stream(wanted)
-        except (ValueError, NotSupported) as e:
+            agen = _source("stream", provider).stream(wanted)
+        except HTTPException as e:
+            await websocket.send_json({"type": "error", "message": e.detail})
+            await websocket.close()
+            return
+        except NotSupported as e:
             await websocket.send_json({"type": "error", "message": str(e)})
             await websocket.close()
             return
-        try:
-            async for item in agen:
-                if "error" in item:
-                    await websocket.send_json({"type": "error",
-                                               "message": item["error"]})
-                    break
-                item["type"] = "tick"
-                await websocket.send_json(item)
-        except WebSocketDisconnect:
-            pass
-        except Exception as e:
+
+        async def pump():
             try:
-                await websocket.send_json({"type": "error", "message": str(e)[:200]})
-            except Exception:
+                async for item in agen:
+                    if "error" in item:
+                        await websocket.send_json({"type": "error",
+                                                   "message": item["error"]})
+                        break
+                    item["type"] = "tick"
+                    await websocket.send_json(item)
+            except WebSocketDisconnect:
                 pass
+            except Exception as e:
+                try:
+                    await websocket.send_json({"type": "error", "message": str(e)[:200]})
+                except Exception:
+                    pass
+
+        async def watch():
+            # Raw receive(): receive_text/json raise on disconnect, and a
+            # receive() after the disconnect message raises too (D12).
+            while (await websocket.receive())["type"] != "websocket.disconnect":
+                pass
+
+        # A silent stream (no tick outside market hours) never fails a send,
+        # so only the watch task sees a closed tab. Order per design_ws.tla:
+        # cancel both, await both, THEN aclose(): aclose() on a generator
+        # still inside __anext__ raises "already running" (D12, F1).
+        tasks = [asyncio.create_task(pump()), asyncio.create_task(watch())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            for t in tasks:
+                t.cancel()
+            # wait, not gather(return_exceptions=True): a cancelled gather
+            # raises a bare CancelledError, which anyio cannot match to its
+            # cancel scope, so the cancel leaks out of the scope.
+            await asyncio.wait(tasks)
+            for t in tasks:
+                if not t.cancelled():
+                    t.exception()  # retrieved: pump reports its errors in-band
             await agen.aclose()
 
     # ── Algo trading: run a strategy LIVE against a brue-connect adapter ──

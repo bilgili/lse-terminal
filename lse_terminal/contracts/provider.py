@@ -34,6 +34,7 @@ UNSUPPORTED: Mapping[str, str] = MappingProxyType({
     "flow": "has no options flow",
     "calendar": "has no economic calendar",
     "macro": "has no macro data",
+    "stream": "does not stream",
 })
 
 
@@ -107,8 +108,12 @@ class Provider(ABC):
         raise NotSupported(f"{self.name} does not serve quotes")
 
     def stream(self, symbols: list[str]) -> AsyncIterator[dict]:
-        """Async iterator of tick dicts: {symbol, price, ts, bid?, ask?, volume?}."""
-        raise NotSupported(f"{self.name} does not stream")
+        """Async iterator of tick dicts: {symbol, price, ts, bid?, ask?, volume?}.
+
+        Must not catch ``CancelledError`` and continue: the engine cancels the
+        task that waits in ``__anext__`` when the tab closes, then awaits it.
+        """
+        raise NotSupported(f"{self.name} {UNSUPPORTED['stream']}")
 
     def prices(self, symbols: list[str]) -> list[dict]:
         """Latest price per symbol. Rows: ``PriceRow``."""

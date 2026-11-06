@@ -108,7 +108,7 @@ For a listing call, `app.js` SHALL append `provider=<active source>` when the ac
 - **THEN** the UI requests `/api/options/flow?provider=moomoo&underlying=...` and renders the 404 as "not supported by this source"
 
 ### Requirement: Symbol routes check the source configuration
-The engine SHALL resolve `/api/instruments` and `/api/candles` through the resolver, with the capabilities `search` and `candles`.
+The engine SHALL resolve every route that names a provider for symbol data through the resolver. These routes are `/api/instruments` (capability `search`), `/api/candles`, `/api/user-indicators/preview`, `/api/backtest`, `/api/backtest/montecarlo` and `/api/backtest/walkforward` (capability `candles`), and `/api/ws` (capability `stream`). Each HTTP route SHALL call the resolver before the `try` block that maps provider errors to 502.
 
 #### Scenario: Unconfigured plugin on the candles route
 - **WHEN** a client calls `/api/candles` with `provider=moomoo` and moomoo is not configured
@@ -119,13 +119,41 @@ The engine SHALL resolve `/api/instruments` and `/api/candles` through the resol
 - **THEN** the route answers 409 and does not call `search`
 
 #### Scenario: Unknown provider on a symbol route
-- **WHEN** a client calls `/api/candles` with an unknown provider
+- **WHEN** a client calls `/api/candles` or `/api/instruments` with an unknown provider
 - **THEN** the route answers 404
 
+#### Scenario: LSE without a key on a symbol route
+- **WHEN** a client calls `/api/candles` or `/api/instruments` with `provider=lse` and no LSE key is set
+- **THEN** the route answers 409 with the detail `LSE provider needs an API key. Get a free one at https://londonstrategicedge.com/data#api and set it in the terminal.`
+
+#### Scenario: Unconfigured plugin on the preview, backtest and quant routes
+- **WHEN** a client calls `/api/user-indicators/preview`, `/api/backtest`, `/api/backtest/montecarlo` or `/api/backtest/walkforward` with an unconfigured provider
+- **THEN** the route answers 409 with the setup hint of that provider
+- **AND** the route does not call `candles`
+
+#### Scenario: Unconfigured plugin on the stream socket
+- **WHEN** a client opens `/api/ws` with an unconfigured provider
+- **THEN** the handler sends `{"type": "error", "message": <setup hint>}` and closes the socket
+- **AND** the handler does not call `stream`
+
+#### Scenario: Source without a stream on the stream socket
+- **WHEN** a client opens `/api/ws` with `provider=userdata`
+- **THEN** the handler sends an error message that contains `does not stream` and closes the socket
+
 ### Requirement: A closed stream socket ends the stream
-The `/api/ws` handler SHALL close the provider stream when the client disconnects, also when the stream sends no item.
+The `/api/ws` handler SHALL close the provider stream when the client disconnects, also when the stream sends no item. The handler SHALL cancel both of its tasks, wait until both tasks have ended, and only then call `aclose()` on the generator.
 
 #### Scenario: Tab closes while no tick arrives
 - **WHEN** the client disconnects and the provider stream has no item to send
 - **THEN** the handler cancels the stream at once and calls `aclose()` on the generator
-- **AND** the provider's `finally` block runs
+- **AND** the provider's `finally` block runs before the handler returns
+
+#### Scenario: Symbol switch closes the old socket
+- **WHEN** the client closes a socket that waits for a tick and opens a new socket for another symbol
+- **THEN** the old handler closes its generator without the error `aclose(): asynchronous generator is already running`
+- **AND** the new socket streams
+
+#### Scenario: Server cancels the handler
+- **WHEN** the server cancels the handler while it waits for its tasks
+- **THEN** the handler cancels both tasks and calls `aclose()` after both tasks have ended
+- **AND** no task runs after the handler has returned
