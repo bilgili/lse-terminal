@@ -180,10 +180,10 @@ Separate repository `lse-terminal-moomoo`. One class `MoomooProvider`, `name = "
 |---|---|
 | `search` | `get_stock_basicinfo` per enabled market; watchlist groups from `get_user_security_group` and `get_user_security` |
 | `candles` | `request_history_kline(code, start, end, ktype, autype=NONE, max_count=1000)` paged on `page_req_key` |
-| `quote`, `prices` | `get_market_snapshot`, 400 codes per call |
+| `quote`, `prices` | `get_market_snapshot`, 400 codes per call, with a 1 s cache of the last answer |
 | `stream` | `subscribe(codes, [TICKER])` and a `TickerHandlerBase`, bridged to asyncio as in `lse.py` |
-| `options_underlyings` | catalog rows with `has_option` |
-| `option_chain` | `get_option_expiration_date`, `get_option_chain`, then `get_market_snapshot` on the contract codes for IV, greeks, OI and volume |
+| `options_underlyings` | US and HK stocks in the user's watchlist groups. The catalog has no `has_option` field; `has_option` exists only as a screener filter |
+| `option_chain` | `get_option_expiration_date`, then `get_option_chain` in windows of at most 30 days, nearest first, at most 8 windows, stop at `limit`; then `get_market_snapshot` on the returned contract codes for IV, greeks, OI and volume. moomoo sends IV in percent; the plugin divides it by 100 |
 
 Timeframes: `1m 5m 15m 30m 1h 1d 1w`. All other methods raise `NotSupported`.
 
@@ -200,7 +200,7 @@ Time: kline `time_key` is a naive string in the exchange's local zone. The plugi
 
 Adjustment: `AuType.NONE`. The cache invariant I2 needs closed bars to stay immutable. Adjusted bars change on every split.
 
-Threading: one `OpenQuoteContext`, one lock around every SDK call, rebuild on a dead socket.
+Threading: one query `OpenQuoteContext` behind one lock. The plugin discards it and retries once on a dead-socket message, and a circuit breaker clears `configured()` after a failed retry or a timeout. Each stream has its own context with a watchdog; a stream never takes the query lock. The plugin's change `moomoo-provider` (`lse-terminal-moomoo/openspec/changes/moomoo-provider/`) holds the full design, its TLA+ model and both reviews.
 
 ### Invariants, checked by `design.tla`
 

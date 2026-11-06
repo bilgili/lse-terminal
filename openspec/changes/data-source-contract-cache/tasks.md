@@ -40,15 +40,15 @@
 
 ## 4. moomoo plugin (separate repository `lse-terminal-moomoo`)
 
-- [ ] 4.1 Verify against a live OpenD: intraday `time_key` marks bar open or bar close. Record the answer in the plugin README and pin it with a test.
-- [ ] 4.2 Package skeleton: `pyproject.toml` with the entry point, deps `lse-terminal`, `moomoo-api`.
-- [ ] 4.3 `MoomooProvider`: config, `configured()` from a cached TCP probe refreshed by a background thread, quota text, lazy context with lock and rebuild, `settle_seconds`.
-- [ ] 4.4 `search` with watchlist groups and market catalogs, 1 h in-memory TTL, prefix then substring ranking.
-- [ ] 4.5 `candles` with paging to `limit`, `AuType.NONE`, inclusive-to-half-open end conversion, zone conversion per market, SDK error to exception.
-- [ ] 4.6 `quote`, `prices`, `stream` with the asyncio bridge and `QuoteSynthesizer`.
-- [ ] 4.7 `options_underlyings`, `option_chain` with snapshot enrichment.
-- [ ] 4.8 Tests: `check_provider` against a fake `OpenQuoteContext`, zone test per market, reconnect test, error-to-exception test, live smoke test gated on `MOOMOO_OPEND`.
-- [ ] 4.9 README: OpenD setup, config, quota, which surfaces fall back to LSE and which show "not supported".
+- [ ] 4.1 Verify against a live OpenD: intraday `time_key` marks bar open or bar close. Record the answer in the plugin README and pin it with a test. Open: the hosted service confirms bar close; the plugin's live test (`tests/test_live.py`) waits for a running OpenD.
+- [x] 4.2 Package skeleton: `pyproject.toml` with the entry point, deps `lse-terminal`, `moomoo-api`.
+- [x] 4.3 `MoomooProvider`: config, `configured()` from a cached TCP probe refreshed by a background thread, quota text, lazy context with lock and rebuild, `settle_seconds`.
+- [x] 4.4 `search` with watchlist groups and market catalogs, 1 h in-memory TTL, prefix then substring ranking.
+- [x] 4.5 `candles` with paging to `limit`, `AuType.NONE`, inclusive-to-half-open end conversion, zone conversion per market, SDK error to exception.
+- [x] 4.6 `quote`, `prices`, `stream` with the asyncio bridge and `QuoteSynthesizer`.
+- [x] 4.7 `options_underlyings`, `option_chain` with snapshot enrichment.
+- [x] 4.8 Tests: `check_provider` against a fake `OpenQuoteContext`, zone test per market, reconnect test, error-to-exception test, live smoke test gated on `MOOMOO_OPEND`.
+- [x] 4.9 README: OpenD setup, config, quota, which surfaces fall back to LSE and which show "not supported".
 
 ## 5. Close
 
