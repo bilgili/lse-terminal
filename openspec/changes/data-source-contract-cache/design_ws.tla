@@ -12,6 +12,14 @@
    MODE "fixed":      the finally cancels BOTH tasks, awaits BOTH, and only
                       then calls agen.aclose().
    SHUTDOWN:          TRUE lets the server cancel the handler while it waits.
+   RECANCEL:          TRUE lets a cancel reach the handler during its cleanup
+                      awaits. anyio re-delivers a cancel until its scope
+                      exits (the Starlette test client, a cancel scope), so
+                      the cancel that started the cleanup arrives again.
+   SHIELD:            TRUE runs the cleanup inside
+                      anyio.move_on_after(5, shield=True). The shield holds a
+                      cancel back until the cleanup ends. The 5 s deadline
+                      (a provider that ignores the cancel) is not modelled.
 
    Granularity: asyncio await points. task.cancel() only sets a request; the
    CancelledError reaches the task at its next resume, and a pending cancel
@@ -22,7 +30,7 @@
    generator has not returned. *)
 EXTENDS TLC
 
-CONSTANTS MODE, SHUTDOWN
+CONSTANTS MODE, SHUTDOWN, RECANCEL, SHIELD
 
 VARIABLES client,   \* "open" | "closed"                      the browser tab
           gen,      \* "running" | "idle" | "pfinal" | "hfinal" | "closed"
@@ -88,6 +96,12 @@ Shutdown ==                          \* the server cancels the handler while it 
        [] MODE = "fixed"      -> handler' = "cancel" /\ UNCHANGED pCancel
   /\ UNCHANGED <<client, gen, pump, watch, wCancel, err>>
 
+CleanupCancel ==                     \* a cancel reaches a cleanup await; the finally stops there
+  /\ RECANCEL /\ ~SHIELD
+  /\ handler \in {"gather", "closing"}
+  /\ handler' = "done"
+  /\ UNCHANGED <<client, gen, pump, watch, pCancel, wCancel, err>>
+
 ---------------------------------------------------------------------------
 (* Pump task. *)
 
@@ -143,7 +157,7 @@ Cancel ==                            \* cancel every task that has not ended
   /\ handler' = IF MODE = "fixed" THEN "gather" ELSE "aclose"
   /\ UNCHANGED <<client, gen, pump, watch, err>>
 
-Gather ==                            \* await asyncio.gather(pump, watch, return_exceptions=True)
+Gather ==                            \* await asyncio.wait([pump, watch]): both tasks have ended
   /\ handler = "gather" /\ pump = "done" /\ watch = "done"
   /\ handler' = "aclose"
   /\ UNCHANGED <<client, gen, pump, watch, pCancel, wCancel, err>>
@@ -166,7 +180,7 @@ Closed ==                            \* the finally that aclose() started ends
 Fair == Sent \/ PumpCancelInGen \/ PumpFinalDone \/ PumpCancelInSend
         \/ WatchRecv \/ WatchCancel \/ Wake \/ Cancel \/ Gather \/ Aclose \/ Closed
 
-Next == ClientClose \/ Tick \/ ErrItem \/ StreamEnds \/ Shutdown \/ Fair
+Next == ClientClose \/ Tick \/ ErrItem \/ StreamEnds \/ Shutdown \/ CleanupCancel \/ Fair
 
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(Sent) /\ WF_vars(PumpCancelInGen) /\ WF_vars(PumpFinalDone)

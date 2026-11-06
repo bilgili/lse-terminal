@@ -16,6 +16,7 @@ import types
 import time
 from pathlib import Path
 
+import anyio
 import pandas as pd
 from fastapi import (FastAPI, File, Form, HTTPException, Request, Response, UploadFile,
                      WebSocket, WebSocketDisconnect)
@@ -7112,20 +7113,25 @@ def create_app() -> FastAPI:
         # so only the watch task sees a closed tab. Order per design_ws.tla:
         # cancel both, await both, THEN aclose(): aclose() on a generator
         # still inside __anext__ raises "already running" (D12, F1).
-        tasks = [asyncio.create_task(pump()), asyncio.create_task(watch())]
+        tasks = [asyncio.create_task(pump(), name="ws-pump"),
+                 asyncio.create_task(watch(), name="ws-watch")]
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            for t in tasks:
-                t.cancel()
-            # wait, not gather(return_exceptions=True): a cancelled gather
-            # raises a bare CancelledError, which anyio cannot match to its
-            # cancel scope, so the cancel leaks out of the scope.
-            await asyncio.wait(tasks)
-            for t in tasks:
-                if not t.cancelled():
-                    t.exception()  # retrieved: pump reports its errors in-band
-            await agen.aclose()
+            # Shielded: anyio re-delivers a cancel until its scope exits, so
+            # an unshielded wait returns while the provider's finally still
+            # runs. 5 s bounds a provider that ignores the cancel (D12).
+            with anyio.move_on_after(5, shield=True):
+                for t in tasks:
+                    t.cancel()
+                # wait, not gather: a cancelled gather raises a bare
+                # CancelledError that anyio cannot match to its scope.
+                await asyncio.wait(tasks)
+                for t in tasks:
+                    if not t.cancelled() and t.exception() is not None:
+                        log.debug("/api/ws %s failed", t.get_name(),
+                                  exc_info=t.exception())
+                await agen.aclose()
 
     # ── Algo trading: run a strategy LIVE against a brue-connect adapter ──
     #

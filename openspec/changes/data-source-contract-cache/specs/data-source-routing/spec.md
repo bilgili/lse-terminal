@@ -157,3 +157,18 @@ The `/api/ws` handler SHALL close the provider stream when the client disconnect
 - **WHEN** the server cancels the handler while it waits for its tasks
 - **THEN** the handler cancels both tasks and calls `aclose()` after both tasks have ended
 - **AND** no task runs after the handler has returned
+
+#### Scenario: A cancel arrives again during the cleanup
+- **WHEN** an anyio cancel scope delivers the cancel again while the handler waits for its tasks to end
+- **THEN** the handler finishes the cleanup, including `aclose()`, before it returns
+- **AND** the cleanup takes at most 5 seconds
+
+#### Scenario: Error item stops the stream
+- **WHEN** the provider stream yields an error item and the handler sends it
+- **THEN** the handler calls `aclose()` on the generator that is stopped at its yield
+- **AND** the provider's `finally` block runs
+
+#### Scenario: Overlapping sockets on a symbol switch
+- **WHEN** the client opens the new socket before it closes the old socket
+- **THEN** closing the old socket releases only the old stream
+- **AND** closing the new socket releases the new stream

@@ -487,25 +487,42 @@ def test_candle_body_route_unknown_provider_is_404(client, path, body):
     assert client.post(path, json={**body, "provider": "nope"}).status_code == 404
 
 
-def test_ast_gate_dynamic_reg_get_only_in_source():
-    """A reg.get with a non-constant argument skips the configuration
-    check; only the resolver may make one (review F3)."""
+def test_ast_gate_registry_lookups():
+    """reg.get skips the configuration check (review F3, L2). A dynamic
+    argument only inside _source; a constant one only from the allowlist;
+    no uncalled reg.get, no getattr(reg, ...), no local alias of reg."""
     tree = ast.parse((ROOT / "lse_terminal/engine/server.py").read_text())
+    anywhere = {"userdata"}          # always configured
+    allowed = {("lse", "_lse_only")}
     bad = []
 
-    def visit(node, fn):
+    def is_reg(n):
+        return isinstance(n, ast.Name) and n.id == "reg"
+
+    def visit(node, fn, parent):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             fn = node.name
-        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "get" and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "reg"
-                and not (node.args and isinstance(node.args[0], ast.Constant))
-                and fn != "_source"):
-            bad.append((node.lineno, fn))
+        if isinstance(node, ast.Attribute) and node.attr == "get" and is_reg(node.value):
+            call = parent if isinstance(parent, ast.Call) and parent.func is node else None
+            arg = call.args[0] if call is not None and call.args else None
+            if call is None:
+                bad.append((node.lineno, fn, "uncalled reg.get"))
+            elif isinstance(arg, ast.Constant):
+                if arg.value not in anywhere and (arg.value, fn) not in allowed:
+                    bad.append((node.lineno, fn, arg.value))
+            elif fn != "_source":
+                bad.append((node.lineno, fn, "dynamic"))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr" and node.args and is_reg(node.args[0])):
+            bad.append((node.lineno, fn, "getattr"))
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and is_reg(node.value):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) for t in targets):
+                bad.append((node.lineno, fn, "alias"))
         for c in ast.iter_child_nodes(node):
-            visit(c, fn)
+            visit(c, fn, node)
 
-    visit(tree, None)
+    visit(tree, None, None)
     assert bad == []
 
 
@@ -526,10 +543,13 @@ def test_ws_source_without_stream_says_does_not_stream(client):
     assert msg["type"] == "error" and "does not stream" in msg["message"]
 
 
-def _silent(released: threading.Event):
+def _silent(released: threading.Event, first: dict | None = None):
+    """A stream that sends `first` (if any) and then no tick ever."""
     async def gen(symbols):
         try:
-            await asyncio.Event().wait()  # no tick ever arrives
+            if first is not None:
+                yield first
+            await asyncio.Event().wait()
             yield {}
         finally:
             await asyncio.sleep(0)  # the moomoo finally awaits too
@@ -563,3 +583,46 @@ def test_ws_symbol_switch_closes_old_stream_and_new_one_streams(client, stub):
     with client.websocket_connect("/api/ws?provider=stub&symbols=Y", headers=WS_HDR) as ws:
         msg = ws.receive_json()
     assert msg == {"symbol": "Y", "price": 1.0, "type": "tick"}
+
+
+def test_ws_error_item_closes_generator_at_its_yield(client, stub):
+    # The pump breaks after the error item, so the generator stops at a
+    # yield and only aclose() runs its finally.
+    released = threading.Event()
+    stub.stream_gen = _silent(released, first={"error": "boom"})
+    with client.websocket_connect("/api/ws?provider=stub&symbols=X", headers=WS_HDR) as ws:
+        assert ws.receive_json() == {"type": "error", "message": "boom"}
+        assert released.wait(5)
+
+
+def test_ws_overlapping_symbol_switch_releases_each_stream(client, stub):
+    ev = {"A": threading.Event(), "B": threading.Event()}
+    stub.stream_gen = lambda symbols: _silent(ev[symbols[0]])(symbols)
+    with (client.websocket_connect("/api/ws?provider=stub&symbols=A", headers=WS_HDR) as a,
+          client.websocket_connect("/api/ws?provider=stub&symbols=B", headers=WS_HDR) as b):
+        a.close()
+        assert ev["A"].wait(5)
+        assert not ev["B"].is_set()
+        b.close()
+        assert ev["B"].wait(5)
+
+
+def test_ws_cleanup_survives_a_repeated_cancel(client, stub):
+    # Leaving the block sends a disconnect and then cancels the handler's
+    # anyio scope, which re-delivers the cancel until the scope exits. An
+    # unshielded cleanup returns while the provider's finally still runs.
+    log = []
+
+    async def gen(symbols):
+        try:
+            await asyncio.Event().wait()
+            yield {}
+        finally:
+            log.append("start")
+            await asyncio.sleep(0.3)  # slow release, e.g. to_thread(ctx.close)
+            log.append("end")
+
+    stub.stream_gen = gen
+    with client.websocket_connect("/api/ws?provider=stub&symbols=X", headers=WS_HDR):
+        pass
+    assert log == ["start", "end"]

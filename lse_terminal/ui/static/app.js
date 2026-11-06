@@ -2223,7 +2223,8 @@ async function loadInstruments(query = "") {
   for (let i = 0; i < tries; i++) {
     // A thrown fetch (offline, connection reset) takes the same retry path as
     // a bad status; before this it rejected out of runSwitchProvider entirely.
-    try { res = await fetch(url); if (res.ok) break; } catch (e) { res = null; }
+    // 409 = the source needs setup (a key): every retry answers the same.
+    try { res = await fetch(url); if (res.ok || res.status === 409) break; } catch (e) { res = null; }
     if (i < tries - 1) await new Promise((r) => setTimeout(r, 400 * (i + 1)));
   }
   if (!res || !res.ok) {
@@ -2236,7 +2237,9 @@ async function loadInstruments(query = "") {
         if (b) b.onclick = () => switchProvider(state.provider);
       }
     }
-    status("instrument load failed");
+    // The engine's detail (a 409 setup hint, a 502 cause) says what to do.
+    const detail = res ? (await res.json().catch(() => ({}))).detail : "";
+    status(typeof detail === "string" && detail ? detail : "instrument load failed");
     return;
   }
   const items = await res.json();

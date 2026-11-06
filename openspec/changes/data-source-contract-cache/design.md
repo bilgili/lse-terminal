@@ -95,37 +95,45 @@ tasks = [asyncio.create_task(pump()), asyncio.create_task(watch())]
 try:
     await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 finally:
-    for t in tasks:
-        t.cancel()
-    await asyncio.wait(tasks)
-    for t in tasks:
-        if not t.cancelled():
-            t.exception()
-    await agen.aclose()
+    with anyio.move_on_after(5, shield=True):
+        for t in tasks:
+            t.cancel()
+        await asyncio.wait(tasks)
+        for t in tasks:
+            if not t.cancelled() and t.exception() is not None:
+                log.debug("/api/ws %s failed", t.get_name(), exc_info=t.exception())
+        await agen.aclose()
 ```
 
 `task.cancel()` only requests a cancel. The pump receives `CancelledError` at its next resume, inside `agen.__anext__()`. The generator runs its `finally` and ends. The second `asyncio.wait` waits until the pump has left the generator. After that wait, `aclose()` finds an ended generator or a generator at a yield. An `aclose()` call before the wait meets a running generator and raises `RuntimeError: aclose(): asynchronous generator is already running`.
 
-The `finally` also runs when the server cancels the handler, so no task runs after the handler returns. The loop after the wait reads the exception of each task that did not cancel, so asyncio logs no "exception was never retrieved". An unexpected error in the watch task therefore does not escape. The pump sends its own errors in-band.
+The `finally` also runs when the server cancels the handler, so no task runs after the handler returns. The loop after the wait reads the exception of each task that did not cancel, so asyncio logs no "exception was never retrieved". The handler logs that exception at debug level. An unexpected error in the watch task therefore does not escape. The pump sends its own errors in-band.
 
-The handler uses `asyncio.wait(tasks)`, not `asyncio.gather(*tasks, return_exceptions=True)` as design-review.md F1 proposed. Both wait for both tasks and raise no task error. They differ when a cancel reaches the handler during the wait. `gather` then raises a new `CancelledError` without the message of the cancel. anyio (the Starlette test client, a cancel scope) identifies its own cancel by that message, so the cancel escapes the scope. `asyncio.wait` passes on the original `CancelledError`. The model step "await both tasks" is the same for both calls.
+The handler uses `asyncio.wait(tasks)`, not `asyncio.gather(*tasks, return_exceptions=True)` as design-review.md F1 proposed. Both wait for both tasks and raise no task error. The two calls are equal for one cancel. They differ when a cancel reaches the handler during the wait. `gather` then raises a new `CancelledError` without the message of the cancel. anyio identifies its own cancel by that message, so the cancel escapes the anyio scope. `asyncio.wait` passes on the original `CancelledError`. The 5 s deadline of the shield is an anyio cancel, so this difference also applies inside the shield. The model step "await both tasks" is the same for both calls.
+
+**Shield.** anyio re-delivers a cancel until its cancel scope exits. The Starlette test client cancels the handler through such a scope. Without the shield, the re-delivered cancel stops the cleanup wait. The handler then returns while the provider's `finally` still runs, and `aclose()` does not run.
+
+`anyio.move_on_after(5, shield=True)` holds the anyio cancel back until the cleanup ends. The cancel then reaches the handler, and the handler ends. The 5 s deadline bounds a provider that does not stop on the cancel. After the deadline, the handler returns and the task of that provider continues. The shield does not hold back a native `task.cancel()`. A repeated native cancel therefore still stops the cleanup. anyio is a dependency of Starlette, so the engine adds no package.
 
 The handler uses `asyncio.wait`, not `asyncio.TaskGroup`, because `pyproject.toml` allows Python 3.10 and `TaskGroup` needs Python 3.11.
 
 A provider stream must not catch `CancelledError` and continue. The wait then does not end. The `stream()` docstring states this rule.
 
-**TLA+ model.** `design_ws.tla` models one handler, one pump task, one watch task, one generator and one tab (design-review.md section 6.3). One step is one asyncio await point. A cancel request is a flag that the task sees at its next resume. The provider's `finally` awaits, so it is a separate step. Ticks, error items, the stream end, the tab close and the server cancel are not fair. All task and handler actions are weakly fair. The mode `fixed` is the order above. The mode `as_written` is the first D12 text (`aclose()` directly after `cancel()`, with no wait for the tasks). The mode `old` is the handler before this change.
+**TLA+ model.** `design_ws.tla` models one handler, one pump task, one watch task, one generator and one tab (design-review.md section 6.3). One step is one asyncio await point. A cancel request is a flag that the task sees at its next resume. The provider's `finally` awaits, so it is a separate step. Ticks, error items, the stream end, the tab close and the server cancel are not fair. All task and handler actions are weakly fair. The mode `fixed` is the order above. The mode `as_written` is the first D12 text (`aclose()` directly after `cancel()`, with no wait for the tasks). The mode `old` is the handler before this change. The constant `RECANCEL` lets a cancel reach the handler during a cleanup await (the wait, or the `finally` that `aclose()` started). The constant `SHIELD` holds that cancel back until the cleanup ends, so the model disables the action. The model does not include the 5 s deadline.
 
 Properties: `NoAlreadyRunning`, `ReleasedOnReturn`, `NoOrphanTask` (invariants), `DisconnectReleases` and `PumpEndReleases` (liveness). TLC 2.19, `-workers 1`:
 
 | Config | Mode | Result | Distinct states |
 |---|---|---|---|
-| `design_ws.cfg` | fixed, shutdown on | PASS (all five) | 83 |
+| `design_ws.cfg` | fixed, shutdown on, repeated cancel on, shield on | PASS (all five) | 83 |
+| `design_ws_unshielded.cfg` | fixed, shutdown on, repeated cancel on, shield off | `ReleasedOnReturn` violated | 27 |
 | `design_ws_as_written.cfg` | as written | `NoAlreadyRunning` violated | 38 |
 | `design_ws_as_written_shutdown.cfg` | as written, shutdown on | `NoOrphanTask` violated | 17 |
 | `design_ws_old.cfg` | old | `DisconnectReleases` violated | 34 |
 
-The model does not cover a second server cancel during the wait, a stream that catches `CancelledError`, or a cancel in the middle of a frame send.
+Counter-example `design_ws_unshielded.cfg`, 4 states: the server cancels the handler, the handler cancels both tasks, and a second cancel stops the cleanup wait. The handler returns while the pump is still inside `__anext__()`.
+
+The model does not cover the 5 s deadline, a repeated native `task.cancel()`, a stream that catches `CancelledError`, or a cancel in the middle of a frame send.
 
 ### D3. Shared timeframe table and bound parser
 
