@@ -400,3 +400,167 @@ The tail call takes the oldest bars after the edge, so a hit drops every bar aft
 - **R6 churn.** The model holds coverage as a set of ticks. It has no rows and no `empty_until`, so it cannot count rows.
 - **`HISTORY`.** The model uses tick 0 as the history start. The guard `c <= edge` of R1 always holds in the model, because coverage never passes the edge.
 - **Limits.** `design.cfg` checks limits {2, 4}. Limit 1 passed only in the reviewer's scratch run.
+
+## 6. Follow-ups after PR 4 review
+
+Scope: the D2 paragraph "Symbol routes `/api/instruments` and `/api/candles`, amended after PR 4", D12, the two new requirements at the end of `specs/data-source-routing/spec.md`, and tasks 6.1 and 6.2. The code is commit `0098b68` on `fix/symbol-routes-ws`. The moomoo plugin is `lse-terminal-moomoo` at `a24c6aa`.
+Method: code reading, asyncio experiments, a Starlette test-client run, and a TLA+ model of D12 (`design_ws.tla`).
+Verdict: **implement the D2 amendment with the changes F2, F6 and F7. Do not implement D12 as written.** In D12, `aclose()` raises on almost every tab close. One change in the cleanup order fixes it: cancel both tasks, await both, then call `aclose()`. With that order, every property of the model holds.
+
+New files beside the proposal:
+
+- `design_ws.tla`: the model of the `/api/ws` handler, with the modes `old`, `as_written` and `fixed`.
+- `design_ws.cfg`: the amended order (F1). It must pass.
+- `design_ws_as_written.cfg`, `design_ws_as_written_shutdown.cfg`: D12 as written. Each run shows one counter-example.
+- `design_ws_old.cfg`: today's handler. It shows the defect that D12 removes.
+
+### 6.1 Claims checked
+
+**Claim 1. No built-in source serves `search` or `candles` without configuration.** The claim holds.
+
+- `userdata`: `configured()` always returns True (`lse_terminal/providers/userdata.py:572-573`).
+- `demo`: the class has no override. The contract default returns True (`lse_terminal/contracts/provider.py:163-168`).
+- `lse`: `configured()` returns `bool(self._key)` (`lse_terminal/providers/lse.py:116-117`). `search` calls `_instruments`, then `_refresh_catalog`, then `_lse()` (`lse.py:144-169`). `candles` calls `_lse()` (`lse.py:278`). `_lse()` raises when the key is not set (`lse.py:122-124`). The tick path builds `LSE(api_key=self._key)` with no key (`lse.py:365`).
+- Hosted mode: `LseProvider()` reads `LSE_API_KEY` from the environment (`lse_terminal/engine/config.py:35-36`). `set_key` refuses in hosted mode (`server.py:6945`). Hosted LSE is configured only when the operator sets that variable. The amendment does not change this.
+- `broker:<name>`: `configured()` returns `broker in hub.conns` (`lse_terminal/engine/broker_hub.py:1229-1232`). `search` and `candles` go through `hub._conn`, which raises `LookupError` for a broker that is not connected (`broker_hub.py:545-549`). The engine removes the source when the broker disconnects (`server.py:7351-7356`).
+- moomoo plugin: `configured()` returns the probe flag (`lse_terminal_moomoo/provider.py:158-159`). `_sdk` raises on the same flag (`provider.py:423-425`). The 409 replaces a call that fails in all cases.
+- `capabilities()` always contains `search` and `candles` (`contracts/provider.py:190`). The resolver branch "the provider lacks `cap`" never runs on these two routes.
+
+**Claim 2. No caller depends on the 502 of these two routes.** The claim holds.
+
+- `loadChart` shows `detail` for every status that is not OK (`lse_terminal/ui/static/app.js:259-262`).
+- `loadInstruments` retries on every status that is not OK. It then shows the fixed text "instrument load failed" (`app.js:2224-2239`).
+- `hopeless` reads `state.lseConfigured`, not the status (`app.js:2220`). Its behaviour does not change.
+- The two key-save probes call `/api/instruments?provider=lse` after a successful save (`app.js:927`, `app.js:11678`). LSE is configured at that time, so the resolver passes.
+- The React sources and the chart bundle check only `res.ok` (`frontend/src/hooks/useMarketData.ts:42-43`, `frontend/src/lib/localEngine.ts:158-160`, `lse_terminal/ui/static/chart/chart.js` lines 40 and 646).
+- No UI code matches the error text ("needs an API key", "candles failed", "search failed", "OpenD").
+- No test expects 502 on these routes. The only 502 assertion is `tests/test_routing.py:201-205`, for the eight lifted routes.
+- These tests call the two routes and pass with no change: `tests/test_api.py:30-56`, `tests/test_api.py:182`, `tests/test_api.py:198`, `tests/test_userdata_and_quant.py:36-77`, `tests/test_userdata_and_quant.py:297`, `tests/test_userdata_and_quant.py:358`, `tests/test_user_indicators.py:50`. They use `demo`, `userdata` or an unknown provider.
+
+**Facts for D12.**
+
+- The client sends no message on `/api/ws`. `connectStream` opens the socket, reads messages and closes the socket (`app.js:354-372`). The React sources have no `/api/ws` client. The `ws.send` calls in `app.js` go to the assistant sockets.
+- `connectStream` closes the old socket on every symbol switch (`app.js:355`). A client disconnect is therefore a frequent event.
+- A `receive()` in one task and a `send()` in another task on the same socket is valid. Starlette keeps a separate state for each direction (`client_state`, `application_state`). The ASGI (Asynchronous Server Gateway Interface) receive and send channels are independent. The amended handler ran correctly with this split in the test client.
+- Starlette raises on a `receive()` after the disconnect message: `WebSocketDisconnected` in 1.10.0 (`starlette/websockets.py:63`), `RuntimeError` in 1.6.0. The watch loop must stop at the first `websocket.disconnect`.
+- uvicorn 0.54.0 closes the transport when the handler returns (`uvicorn/protocols/websockets/websockets_impl.py:275`). The handler needs no explicit `close()` after the pump ends. This is today's behaviour.
+
+### 6.2 Findings
+
+**F1 (high). The D12 cleanup order raises "already running" and can leave the pump running.**
+D12 says that the handler cancels the other task, and that its `finally` calls `agen.aclose()`. `task.cancel()` only requests a cancel. The `CancelledError` reaches the pump at its next resume. When the handler calls `aclose()` before that resume, the pump is still inside `agen.__anext__()`. CPython 3.12.13, 3.14.5 and 3.15.0a8 then raise `RuntimeError: aclose(): asynchronous generator is already running`. The scratch experiment shows this with a `finally` that does not await, and with a `finally` that awaits. The moomoo `finally` awaits `asyncio.to_thread(ctx.close)` (`lse_terminal_moomoo/provider.py:379-381`).
+A silent stream waits in `__anext__()` almost all the time. The error therefore occurs on almost every symbol switch, and uvicorn logs it. The provider's `finally` still runs, but in the pump task after the handler has returned. The spec scenario "calls `aclose()` ... AND the provider's `finally` block runs" then does not hold.
+There is a second defect. `asyncio.wait` does not cancel its tasks when the server cancels the waiting handler. The scratch experiment shows the pump still running after the handler has ended. The D12 `finally` contains only `aclose()`, so the pump keeps the stream and its OpenD subscription.
+TLC: `design_ws_as_written.cfg` violates `NoAlreadyRunning` (section 6.3). `design_ws_as_written_shutdown.cfg` violates `NoOrphanTask`.
+Design change. Write this order in D12:
+
+```python
+tasks = [asyncio.create_task(pump()), asyncio.create_task(watch())]
+try:
+    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+finally:
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    await agen.aclose()
+```
+
+The `finally` cancels both tasks, also when the server cancels the handler. `gather` waits until the pump has left the generator. `aclose()` then finds an ended generator, or a generator at a yield. Use `asyncio.wait`, not `asyncio.TaskGroup`: `pyproject.toml:11` allows Python 3.10, and `TaskGroup` needs Python 3.11. `design_ws.cfg` passes with this order. Replace the last sentence of the D12 claim, "`aclose()` on an ended generator does nothing", with "after `gather`, `aclose()` finds an ended generator or a generator at a yield".
+
+**F2 (medium). The resolver call must come before the route's `try`.**
+Each route puts the provider call in a `try` with `except Exception` → 502 (`server.py:699-707`, `server.py:822-832`). FastAPI's `HTTPException` is an `Exception`. A `_source` call inside the `try` changes the 409 into 502 `candles failed: 409: moomoo is not configured`.
+Design change. Add to the D2 amendment: "The route calls `_source` before its `try`. The `try` keeps `ValueError` → 404 and other errors → 502 for the provider call only." The 409 test of F7 detects a wrong position.
+
+**F3 (medium). Three other routes keep the old lookup.**
+The indicator preview (`server.py:903`), the backtest (`server.py:1075`) and the quant modes (`server.py:1095`) call `reg.get(body.provider)` and then `candles()`. The preview sends the active source (`app.js:7680-7686`), so an unconfigured moomoo still answers 502 there. The ML trainer (`server.py:4478`) accepts only `userdata` (`server.py:4472-4476`), which is always configured.
+Judgement: the resolver is the correct single owner. It is the only layer that knows HTTP status, capabilities and the configuration rule together. The boundary is in the correct place, but three callers do not go through it.
+Design change. These three routes call `_source("candles", body.provider)` before their `try`. Add an AST (abstract syntax tree) gate beside `test_grep_gate_reg_get_lse_only_in_lse_only` (`tests/test_routing.py:266-283`): in `server.py`, a `reg.get` call with an argument that is not a constant occurs only inside `_source`.
+Discarded: the check in `Registry.get`. The registry has no HTTP status, and `set_key`, `clear_key` and the broker sync need plain lookups. Discarded: a typed error in each provider. Each plugin then repeats the rule.
+
+**F4 (medium). `/api/ws` also skips the configuration check.**
+The handler calls `reg.get(provider)` (`server.py:7075`). For an unconfigured moomoo, `stream()` opens a new OpenD context on each connect (`lse_terminal_moomoo/provider.py:354`). The connect waits up to `CONNECT_TIMEOUT = 3` seconds (`provider.py:59`). The plugin records that a context closed during the connect leaks a timer thread (`provider.py:54-57`). The UI connects again on every symbol switch.
+Design change, in task 6.2: after `accept()`, the handler resolves with `_source("stream", provider)`. It catches `HTTPException`, sends `detail` as `{"type": "error"}`, and closes, as today for `NotSupported`. Add `"stream": "does not stream"` to `UNSUPPORTED` (`contracts/provider.py:29-37`). The default `stream()` then uses that entry. Without the entry, the resolver answers `does not support stream` (`server.py:737`). The UI filter matches only `does not stream` (`app.js:367`), so every MY DATA chart would show a stream error.
+`X-Source` does not apply. The socket has no response headers after the handshake, and the page names the provider.
+
+**F5 (medium). The test of task 6.2 must assert inside the test-client block.**
+When the `with` block ends, the Starlette test client sends a disconnect and then cancels the handler's cancel scope (`starlette/testclient.py:112-113`, `testclient.py:119`). That cancel also reaches today's handler. With a `finally` that does not await, a check after the `with` block passes on today's handler. The scratch run shows this.
+Design change, for the test. The stub stream waits for ever, and its `finally` awaits once and then sets a `threading.Event`. Inside the `with` block, the test calls `ws.send_text("not json")`, then `ws.close()`, then waits on the event with a timeout. Scratch run: today's handler, event not set; amended handler, event set.
+
+**F6 (low). Keep the LSE key instruction on these routes.**
+D2 says that `LseProvider` keeps today's per-route texts word for word. Today a keyless LSE chart shows `candles failed: LSE provider needs an API key. Get a free one at ...`. The amendment changes this to `lse is not configured`, which loses the instruction. `loadChart` shows the detail in the status line (`app.js:259-262`).
+Design change. Add `"search"` and `"candles"` with the value `_NEEDS_KEY` to `_SETUP_HINT` (`providers/lse.py:28-34`). Add `"stream"` too with F4. Correct the sentence about the default hint in the D2 amendment.
+
+**F7 (low). Task 6.1 names tests that do not exist.**
+No test expects 502 for a keyless LSE on these routes (claim 2). Change 6.1 from "Update the tests" to "Add tests":
+
+- A stub with `configured()` False answers 409 with `stub is not configured` on both routes. The stub records no `search` or `candles` call. The stub methods at `tests/test_routing.py:55-59` need `_hit` for this.
+- An unknown provider on `/api/instruments` answers 404. Today only `/api/candles` has this test (`tests/test_api.py:52-53`).
+- A keyless LSE answers 409 with the F6 text.
+
+**F8 (low). Name the primitive of the watch task.**
+The watch task calls `websocket.receive()` and compares `message["type"]`. It does not use `receive_text()` or `receive_json()`. Both raise on disconnect, and `receive_json()` parses the message. `gather(..., return_exceptions=True)` absorbs an unexpected error in the watch task. The pump sends its own errors in-band, as today. Write this in D12.
+
+**F9 (low). Stale comments and `X-Source`.**
+Two comments still say that the keyless catalog answers 502 (`app.js:2218-2219`, `app.js:11686-11687`). Update them in 6.1. D2 says that every successful capability answer carries `X-Source`. Pass `response=response` to `_source` on both routes, so the rule has no exception. The page names the provider, so this changes no behaviour.
+
+### 6.3 TLA+ model of D12
+
+D12 says "No TLA+ model: ... no shared state except the generator, which one task owns." This is not correct. The pump task calls `__anext__()` and the handler calls `aclose()` on the same generator. The pump task and the watch task share the socket. F1 is an ordering defect between these tasks. The user rule therefore requires a model.
+
+`design_ws.tla` models one handler, one pump task, one watch task, one generator and one tab. The step size is one asyncio await point. A cancel request is a flag. The task receives `CancelledError` at its next resume, and a pending cancel wins over a ready result. The provider's `finally` awaits, so it is a separate step. These environment actions are not fair: a tick, an error item, the end of the stream, the tab close, and the server cancel of the handler. A tick can therefore never arrive. All task and handler actions are weakly fair.
+
+Modes: `old` is today's handler. `as_written` is the D12 text. `fixed` is the F1 order. The constant `SHUTDOWN` lets the server cancel the handler while it waits.
+
+Properties:
+
+- `NoAlreadyRunning`: no `aclose()` or `__anext__()` call meets a generator that runs.
+- `ReleasedOnReturn`: when the handler returns, the provider's `finally` has run.
+- `NoOrphanTask`: no task runs after the handler has returned.
+- `DisconnectReleases`: a closed tab leads to a closed generator and a returned handler, also when no tick arrives.
+- `PumpEndReleases`: a pump that ends leads to the same end state.
+
+TLC 2.19, `-workers 1`:
+
+| Config | Mode | Result | Distinct states | Time |
+|---|---|---|---|---|
+| `design_ws.cfg` | fixed, shutdown on | PASS (all five) | 83 | <1 s |
+| `design_ws_as_written.cfg` | as written, shutdown off | **NoAlreadyRunning violated** | 38 | <1 s |
+| `design_ws_as_written_shutdown.cfg` | as written, shutdown on | **NoOrphanTask violated** | 17 | <1 s |
+| `design_ws_old.cfg` | old | invariants hold, **DisconnectReleases violated** | 34 | <1 s |
+
+TLC stops at the first violation. A failing run's state count is the part of the graph that TLC searched.
+
+Counter-example `design_ws_as_written.cfg`, 6 states:
+
+```
+1  pump in __anext__, generator running, watch in receive
+2  ClientClose     the tab closes
+3  WatchRecv       receive() returns websocket.disconnect
+4  Wake            asyncio.wait returns
+5  Cancel          pump.cancel(): request only, the pump is still inside __anext__
+6  Aclose          aclose() meets the running generator: RuntimeError
+```
+
+Counter-example `design_ws_as_written_shutdown.cfg`, 3 states: the server cancels the handler. The `finally` calls `aclose()` while the pump still waits in `__anext__()`, and `aclose()` raises. The handler returns, and the pump keeps running with no cancel request.
+
+Counter-example `design_ws_old.cfg`: the tab closes while the pump waits in `__anext__()`, and no tick arrives. No fair action is enabled, so the generator stays open for ever. This is the defect that D12 removes.
+
+What the model does not cover:
+
+- A second server cancel during `gather`. The `finally` then stops before `aclose()`. A generator at a yield then stays open until the asyncio finalizer hook closes it at garbage collection.
+- A provider generator that catches `CancelledError` and continues. `gather` then waits for ever. The `stream()` docstring can state that a stream must not catch `CancelledError`.
+- A cancel in the middle of a frame send. This occurs only after the tab has gone.
+
+Scratch evidence, outside the repository:
+
+- The asyncio experiment ran on CPython 3.12.13, 3.14.5 and 3.15.0a8.
+- The test-client run used Starlette 1.6.0 and FastAPI 0.141.1, because the moomoo environment has no `httpx2`.
+- The code reading used Starlette 1.10.0, FastAPI 0.162.0 and uvicorn 0.54.0 from the moomoo environment.
+
+### 6.4 Edits for the author, by severity
+
+1. **D12 (F1, F8).** Write the cleanup order of F1. Name `websocket.receive()` as the watch primitive. Replace "No TLA+ model" with a reference to `design_ws.tla` and section 6.3.
+2. **Spec (F1).** Add a scenario: when the server cancels the handler, the handler cancels both tasks and calls `aclose()` after both tasks have ended.
+3. **D2 amendment (F2, F3, F6).** State the position of `_source`. Extend the change to the preview, backtest and quant routes, with the AST gate. Use `_NEEDS_KEY` for the LSE hint.
+4. **Task 6.2 (F4, F5).** Resolve the stream source through `_source("stream", provider)` and add the `UNSUPPORTED` entry. Write the test as F5 describes.
+5. **Task 6.1 (F7, F9).** Change "Update the tests" to "Add tests" with the F7 list. Update the two stale comments. Pass `response` to `_source`.
