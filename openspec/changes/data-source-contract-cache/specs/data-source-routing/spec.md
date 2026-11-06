@@ -106,3 +106,26 @@ For a listing call, `app.js` SHALL append `provider=<active source>` when the ac
 #### Scenario: Source lacks the tape
 - **WHEN** the rail was answered with `X-Source: moomoo` and the user opens the flow tape for an underlying
 - **THEN** the UI requests `/api/options/flow?provider=moomoo&underlying=...` and renders the 404 as "not supported by this source"
+
+### Requirement: Symbol routes check the source configuration
+The engine SHALL resolve `/api/instruments` and `/api/candles` through the resolver, with the capabilities `search` and `candles`.
+
+#### Scenario: Unconfigured plugin on the candles route
+- **WHEN** a client calls `/api/candles` with `provider=moomoo` and moomoo is not configured
+- **THEN** the route answers 409 with the detail `moomoo is not configured`
+
+#### Scenario: Unconfigured plugin on the instruments route
+- **WHEN** a client calls `/api/instruments` with `provider=moomoo` and moomoo is not configured
+- **THEN** the route answers 409 and does not call `search`
+
+#### Scenario: Unknown provider on a symbol route
+- **WHEN** a client calls `/api/candles` with an unknown provider
+- **THEN** the route answers 404
+
+### Requirement: A closed stream socket ends the stream
+The `/api/ws` handler SHALL close the provider stream when the client disconnects, also when the stream sends no item.
+
+#### Scenario: Tab closes while no tick arrives
+- **WHEN** the client disconnects and the provider stream has no item to send
+- **THEN** the handler cancels the stream at once and calls `aclose()` on the generator
+- **AND** the provider's `finally` block runs

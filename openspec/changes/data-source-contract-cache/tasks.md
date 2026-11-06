@@ -55,3 +55,8 @@
 - [ ] 5.1 `openspec validate data-source-contract-cache` clean.
 - [ ] 5.2 Claude review subagent over `git diff main...` per PR, Opus for PR 1 to 3, findings folded.
 - [ ] 5.3 `openspec archive data-source-contract-cache` after PR 3 merges.
+
+## 6. Follow-ups after PR 4
+
+- [ ] 6.1 `/api/instruments` and `/api/candles` resolve through `_source` (409 for an unconfigured source). Update the tests that expect 502 for a keyless LSE.
+- [ ] 6.2 `/api/ws` runs a pump task and a watch task; the first task that ends cancels the other (D12). Test: a silent stream ends when the client disconnects.
